@@ -859,6 +859,23 @@ document.addEventListener('visibilitychange', () => {
     }
 });
 
+// --- TAILLE DU TEXTE DE LECTURE ---
+let readFontSize = parseFloat(localStorage.getItem("focus_read_font_size")) || 1.15;
+const applyFontSize = () => {
+    document.documentElement.style.setProperty('--read-size', `${readFontSize.toFixed(2)}rem`);
+    localStorage.setItem("focus_read_font_size", readFontSize.toFixed(2));
+    updateScroll();
+};
+on('font-dec-btn', 'onclick', () => {
+    readFontSize = Math.max(0.85, readFontSize - 0.1);
+    applyFontSize();
+});
+on('font-inc-btn', 'onclick', () => {
+    readFontSize = Math.min(1.75, readFontSize + 0.1);
+    applyFontSize();
+});
+applyFontSize();
+
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
 }

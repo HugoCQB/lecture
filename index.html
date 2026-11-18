@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-    <meta name="theme-color" content="#0b0b0b">
+    <meta name="theme-color" content="#000000">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <title>Focus Read</title>
     <link rel="manifest" href="manifest.json">
@@ -75,7 +75,11 @@
         <header class="read-bar">
             <button id="pause-reading-btn" type="button" class="text-btn">← Pause</button>
             <span id="hud-chapter-title" class="truncate">Chapitre</span>
-            <span id="scroll-percent" class="muted">0%</span>
+            <div class="font-controls">
+                <button id="font-dec-btn" type="button" class="font-btn" aria-label="Réduire le texte">A-</button>
+                <button id="font-inc-btn" type="button" class="font-btn" aria-label="Agrandir le texte">A+</button>
+                <span id="scroll-percent" class="scroll-tag">0%</span>
+            </div>
         </header>
 
         <article id="text-track"></article>
@@ -89,7 +93,7 @@
     <section id="quiz-screen" class="wrap" hidden>
         <header class="bar">
             <h1 id="quiz-title">Quiz</h1>
-            <button id="abandon-quiz-btn" type="button" class="text-btn muted">Quitter</button>
+            <button id="abandon-quiz-btn" type="button" class="text-btn">Quitter</button>
         </header>
 
         <div id="quiz-container"></div>
@@ -135,7 +139,7 @@
                 <h2>Classement</h2>
                 <button type="button" class="text-btn" data-close="leaderboard-overlay">Fermer</button>
             </header>
-            <p class="muted small">Profil : <span id="current-lb-key">—</span></p>
+            <p class="small">Profil : <span id="current-lb-key">—</span></p>
             <div id="leaderboard-list" class="list modal-scroll"></div>
         </div>
     </div>
