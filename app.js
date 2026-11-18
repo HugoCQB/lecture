@@ -15,7 +15,10 @@ let currentChapterIndex = 0;
 let activeText = "";
 let generatedQuiz = [];
 let userAnswers = {};
+
+// Verrous de sécurité anti-écrasement
 let isSaving = false;
+let accountLoaded = false;
 
 let syncKey = localStorage.getItem("focus_read_sync_key") || null;
 let currentKeyPassword = localStorage.getItem("focus_read_sync_pwd") || "";
@@ -25,13 +28,19 @@ let userStats = { scoreTotal: 0, quizzesCompleted: 0, perfectScores: 0, totalCha
 
 const esc = s => String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
 const cleanKey = k => String(k).trim().replace(/[.#$\[\]/]/g, '_');
+const slugifyTitle = t => String(t || "sans_titre")
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48) || "sans_titre";
+
 const dateKey = (offset = 0) => {
     const d = new Date();
     d.setDate(d.getDate() + offset);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
-const isChapterValidated = (book, chap) => Boolean(book && chap && (book.readChapters || []).includes(chap.id));
+const toArray = val => Array.isArray(val) ? val : Object.values(val || {});
+const mergeReadChapters = (...lists) => [...new Set(lists.flatMap(l => toArray(l)).filter(Boolean))];
+const isChapterValidated = (book, chap) => Boolean(book && chap && toArray(book.readChapters).includes(chap.id));
 
 async function fetchWithTimeout(url, opts = {}, timeoutMs = 15000) {
     const ctrl = new AbortController();
@@ -45,6 +54,7 @@ async function fetchWithTimeout(url, opts = {}, timeoutMs = 15000) {
 
 async function fb(path, method = "GET", body = null) {
     const cleanPath = path.replace(/^\/+/, '');
+    if (!cleanPath) throw new Error("Chemin Firebase racine interdit.");
     const opts = { method, cache: "no-store" };
     if (body !== null) {
         opts.headers = { "Content-Type": "application/json" };
@@ -97,7 +107,7 @@ function questionCount(words) {
     return 12;
 }
 
-// --- BACK-END : SYNCHRONISATION FIREBASE ---
+// --- BACK-END : SYNCHRONISATION FIREBASE BLINDÉE ---
 
 function updateAccountUI() {
     $('syncKeyLabel').textContent = syncKey ? `${syncKey}${currentKeyPassword ? " · 🔒" : ""}` : "Définir un compte";
@@ -105,7 +115,7 @@ function updateAccountUI() {
 }
 
 async function canWriteAccount() {
-    if (!syncKey) return false;
+    if (!syncKey || !accountLoaded) return false;
     const distantHash = await fb(`focus_read_users/${encodeURIComponent(syncKey)}/passwordHash`);
     return !distantHash || distantHash === await sha256(currentKeyPassword);
 }
@@ -118,11 +128,16 @@ async function saveBookCloud(book) {
     if (!syncKey) {
         syncKey = "READ-" + Math.random().toString(36).substring(2, 8).toUpperCase();
         localStorage.setItem("focus_read_sync_key", syncKey);
+        accountLoaded = true;
         updateAccountUI();
+    }
+    if (!accountLoaded) {
+        setSyncStatus("Chargement du compte requis avant écriture");
+        return false;
     }
 
     isSaving = true;
-    book.id = cleanKey(book.id || `book_${Date.now()}`);
+    book.id = cleanKey(book.id || `book_${slugifyTitle(book.title)}`);
     setSyncStatus("Sauvegarde du livre...");
 
     try {
@@ -132,17 +147,24 @@ async function saveBookCloud(book) {
         }
 
         const base = `focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`;
+
+        // Lecture défensive de l'existant distant pour ne jamais écraser une progression antérieure
+        const existingDistant = await fb(base).catch(() => null);
+        const mergedRead = mergeReadChapters(existingDistant?.readChapters, book.readChapters);
+        const mergedPaused = { ...(existingDistant?.pausedPositions || {}), ...(book.pausedPositions || {}) };
+        const mergedLastIndex = Math.max(existingDistant?.lastIndex || 0, book.lastIndex || 0);
+
         const meta = {
             id: book.id,
-            publicId: book.publicId || null,
-            title: book.title || "Sans titre",
-            fileName: book.fileName || "livre.epub",
-            visibility: book.visibility || 'public',
-            sharedBy: book.sharedBy || syncKey,
-            readChapters: book.readChapters || [],
-            pausedPositions: book.pausedPositions || {},
-            lastIndex: book.lastIndex || 0,
-            updatedAt: book.updatedAt || Date.now()
+            publicId: book.publicId || existingDistant?.publicId || null,
+            title: book.title || existingDistant?.title || "Sans titre",
+            fileName: book.fileName || existingDistant?.fileName || "livre.epub",
+            visibility: book.visibility || existingDistant?.visibility || 'public',
+            sharedBy: book.sharedBy || existingDistant?.sharedBy || syncKey,
+            readChapters: mergedRead,
+            pausedPositions: mergedPaused,
+            lastIndex: mergedLastIndex,
+            updatedAt: Date.now()
         };
 
         await fb(base, "PATCH", meta);
@@ -177,7 +199,7 @@ async function saveBookCloud(book) {
 }
 
 async function saveBookProgress(book) {
-    if (!book || !syncKey) return false;
+    if (!book || !syncKey || !accountLoaded) return false;
     const idx = accountBooks.findIndex(b => b.id === book.id);
     if (idx >= 0) accountBooks[idx] = { ...accountBooks[idx], ...book };
 
@@ -194,8 +216,15 @@ async function saveBookProgress(book) {
             return false;
         }
         const base = `focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`;
+
+        // Fusion avec la liste distante pour garantir que readChapters ne régresse jamais
+        const distantRead = await fb(`${base}/readChapters`).catch(() => []);
+        const mergedRead = mergeReadChapters(distantRead, book.readChapters);
+        book.readChapters = mergedRead;
+        if (idx >= 0) accountBooks[idx].readChapters = mergedRead;
+
         await fb(base, "PATCH", {
-            readChapters: book.readChapters || [],
+            readChapters: mergedRead,
             pausedPositions: book.pausedPositions || {},
             lastIndex: book.lastIndex || 0,
             updatedAt: Date.now()
@@ -221,14 +250,20 @@ async function pullAccount(silent = false) {
         syncKey = cleaned || ("READ-" + Math.random().toString(36).substring(2, 8).toUpperCase());
         localStorage.setItem("focus_read_sync_key", syncKey);
         updateAccountUI();
-        if (!cleaned) return pushStats();
+        if (!cleaned) {
+            accountLoaded = true;
+            return pushStats();
+        }
     }
 
     if (!silent) setSyncStatus("Chargement...");
     try {
         const data = await fb(`focus_read_users/${encodeURIComponent(syncKey)}`);
         if (isSaving) return;
-        if (!data) {
+
+        // Réponse 200 confirmée : le compte n'existe pas encore sur Firebase
+        if (data === null) {
+            accountLoaded = true;
             setSyncStatus("Nouveau profil", true);
             return pushStats();
         }
@@ -243,6 +278,7 @@ async function pullAccount(silent = false) {
             if (await sha256(currentKeyPassword) !== data.passwordHash) {
                 syncKey = null;
                 currentKeyPassword = "";
+                accountLoaded = false;
                 localStorage.removeItem("focus_read_sync_key");
                 localStorage.removeItem("focus_read_sync_pwd");
                 updateAccountUI();
@@ -252,41 +288,62 @@ async function pullAccount(silent = false) {
             updateAccountUI();
         }
 
+        // Fusion défensive : on garde toujours le maximum entre local (si déjà chargé) et distant
         userStats = {
-            scoreTotal: data.scoreTotal || 0,
-            quizzesCompleted: data.quizzesCompleted || 0,
-            perfectScores: data.perfectScores || 0,
-            totalChaptersRead: data.totalChaptersRead || data.perfectScores || 0,
+            scoreTotal: Math.max(accountLoaded ? userStats.scoreTotal : 0, data.scoreTotal || 0),
+            quizzesCompleted: Math.max(accountLoaded ? userStats.quizzesCompleted : 0, data.quizzesCompleted || 0),
+            perfectScores: Math.max(accountLoaded ? userStats.perfectScores : 0, data.perfectScores || 0),
+            totalChaptersRead: Math.max(accountLoaded ? userStats.totalChaptersRead : 0, data.totalChaptersRead || data.perfectScores || 0),
             streakDays: data.streakDays || 0,
             lastReadDate: data.lastReadDate || null
         };
         renderStats();
 
+        const localById = new Map(accountBooks.map(b => [b.id, b]));
         accountBooks = Object.values(data.library || {})
             .filter(b => b && b.chapters)
-            .map(b => ({
-                ...b,
-                chapters: (Array.isArray(b.chapters) ? b.chapters : Object.values(b.chapters)).filter(c => c && c.text),
-                readChapters: Array.isArray(b.readChapters) ? b.readChapters : Object.values(b.readChapters || {}),
-                pausedPositions: b.pausedPositions || {}
-            }))
+            .map(b => {
+                const prev = localById.get(b.id);
+                return {
+                    ...b,
+                    chapters: toArray(b.chapters).filter(c => c && c.text),
+                    readChapters: mergeReadChapters(prev?.readChapters, b.readChapters),
+                    pausedPositions: { ...(prev?.pausedPositions || {}), ...(b.pausedPositions || {}) }
+                };
+            })
             .filter(b => b.chapters.length > 0);
+
+        accountLoaded = true;
 
         if (!$('setup-screen').hidden) renderLibrary(activeBook?.id);
         setSyncStatus(`À jour · ${accountBooks.length} livre${accountBooks.length > 1 ? 's' : ''}`, true);
     } catch (e) {
+        // En cas d'erreur réseau, accountLoaded reste false si non chargé : aucune écriture ne peut écraser la base
         if (!silent) setSyncStatus(`Erreur réseau (${e.message})`);
     }
 }
 
 async function pushStats() {
-    if (!navigator.onLine || !syncKey) return;
+    if (!navigator.onLine || !syncKey || !accountLoaded) return;
     isSaving = true;
     try {
         if (!await canWriteAccount()) return setSyncStatus("Écriture refusée");
+
+        // Relecture distante avant écriture pour empêcher toute régression de compteur
+        const distant = await fb(`focus_read_users/${encodeURIComponent(syncKey)}`).catch(() => null);
+        const safeStats = {
+            scoreTotal: Math.max(distant?.scoreTotal || 0, userStats.scoreTotal || 0),
+            quizzesCompleted: Math.max(distant?.quizzesCompleted || 0, userStats.quizzesCompleted || 0),
+            perfectScores: Math.max(distant?.perfectScores || 0, userStats.perfectScores || 0),
+            totalChaptersRead: Math.max(distant?.totalChaptersRead || 0, userStats.totalChaptersRead || 0),
+            streakDays: Math.max(distant?.streakDays || 0, getStreak()),
+            lastReadDate: userStats.lastReadDate || distant?.lastReadDate || null
+        };
+        userStats = { ...userStats, ...safeStats };
+        renderStats();
+
         await fb(`focus_read_users/${encodeURIComponent(syncKey)}`, "PATCH", {
-            ...userStats,
-            streakDays: getStreak(),
+            ...safeStats,
             passwordHash: await sha256(currentKeyPassword),
             updatedAt: Date.now()
         });
@@ -306,7 +363,7 @@ async function switchAccount() {
     const val = choice.trim();
 
     if (val === "2") {
-        if (!syncKey) return alert("Définissez d'abord un compte.");
+        if (!syncKey || !accountLoaded) return alert("Chargez d'abord un compte valide.");
         const pwd = prompt("Nouveau mot de passe (laisser vide pour supprimer) :");
         if (pwd === null) return;
         currentKeyPassword = pwd.trim();
@@ -318,6 +375,7 @@ async function switchAccount() {
     const raw = val === "1" ? (prompt("Nom exact du compte :") || "") : val;
     syncKey = cleanKey(raw) || ("READ-" + Math.random().toString(36).substring(2, 8).toUpperCase());
     currentKeyPassword = "";
+    accountLoaded = false;
     localStorage.removeItem("focus_read_sync_pwd");
     localStorage.setItem("focus_read_sync_key", syncKey);
 
@@ -339,7 +397,6 @@ async function handleFileUpload(e) {
     label.textContent = "Analyse du fichier...";
 
     try {
-        const bookId = cleanKey(`book_${file.name}_${file.size}`);
         let title = file.name.replace(/\.(epub|txt)$/i, '');
         let chapters = [];
 
@@ -353,7 +410,12 @@ async function handleFileUpload(e) {
 
         if (!chapters.length) throw new Error("Aucun chapitre lisible trouvé.");
 
-        const existing = accountBooks.find(b => b.id === bookId);
+        // ID stable basé sur le titre normalisé (indépendant du nom de fichier ou de sa taille)
+        const slugId = cleanKey(`book_${slugifyTitle(title)}`);
+        const legacyId = cleanKey(`book_${file.name}_${file.size}`);
+        const existing = accountBooks.find(b => b.id === slugId || b.id === legacyId || slugifyTitle(b.title) === slugifyTitle(title));
+        const bookId = existing?.id || slugId;
+
         const book = {
             id: bookId,
             publicId: existing?.publicId || null,
@@ -362,7 +424,7 @@ async function handleFileUpload(e) {
             visibility: existing?.visibility || 'public',
             sharedBy: syncKey || "Anonyme",
             chapters,
-            readChapters: existing?.readChapters || [],
+            readChapters: mergeReadChapters(existing?.readChapters),
             pausedPositions: existing?.pausedPositions || {},
             lastIndex: existing ? Math.min(existing.lastIndex || 0, chapters.length - 1) : 0,
             updatedAt: Date.now()
@@ -423,7 +485,7 @@ async function parseEpub(file) {
 async function publishPublic(book) {
     if (!navigator.onLine) return false;
     try {
-        const pubId = book.publicId || `${book.title.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-zA-Z0-9]/g, "_").slice(0, 24)}_${Date.now()}`;
+        const pubId = book.publicId || `${slugifyTitle(book.title)}_${Date.now()}`;
         book.publicId = pubId;
         await fb(`focus_read_public_books/${encodeURIComponent(pubId)}`, "PUT", {
             id: pubId, localId: book.id, title: book.title, fileName: book.fileName,
@@ -489,13 +551,24 @@ function renderLibrary(selectedId = null) {
             renderLibrary(book.id);
         };
 
+        // Double confirmation avant toute suppression définitive d'un livre
         row.querySelector('.btn-del').onclick = async e => {
             e.stopPropagation();
-            if (!confirm(`Supprimer "${book.title}" ?`)) return;
-            await fb(`focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`, "DELETE").catch(() => {});
-            if (isPub && isOwner) await fb(`focus_read_public_books/${encodeURIComponent(book.publicId || book.id)}`, "DELETE").catch(() => {});
-            accountBooks = accountBooks.filter(b => b.id !== book.id);
-            renderLibrary();
+            if (!accountLoaded || !syncKey || !book.id) return;
+            if (!confirm(`Voulez-vous vraiment supprimer "${book.title}" et sa progression (${readCount}/${book.chapters.length} ch.) ?`)) return;
+            const typed = prompt(`Pour confirmer la suppression définitive, tapez : SUPPRIMER`);
+            if (typed !== "SUPPRIMER") return;
+
+            isSaving = true;
+            try {
+                if (!await canWriteAccount()) return alert("Accès refusé.");
+                await fb(`focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`, "DELETE");
+                if (isPub && isOwner) await fb(`focus_read_public_books/${encodeURIComponent(book.publicId || book.id)}`, "DELETE").catch(() => {});
+                accountBooks = accountBooks.filter(b => b.id !== book.id);
+                renderLibrary();
+            } finally {
+                isSaving = false;
+            }
         };
 
         list.appendChild(row);
@@ -749,9 +822,7 @@ async function evaluateQuiz() {
         userStats.quizzesCompleted += 1;
         if (perfect) {
             userStats.perfectScores += 1;
-            const currentRead = new Set(activeBook.readChapters || []);
-            currentRead.add(chap.id);
-            activeBook.readChapters = [...currentRead];
+            activeBook.readChapters = mergeReadChapters(activeBook.readChapters, [chap.id]);
             userStats.totalChaptersRead += 1;
             if (userStats.lastReadDate === dateKey(-1)) userStats.streakDays = (userStats.streakDays || 0) + 1;
             else if (userStats.lastReadDate !== dateKey(0)) userStats.streakDays = 1;
@@ -792,10 +863,11 @@ async function openCommunity() {
         const data = await fb('focus_read_public_books');
         if (!data) return (list.innerHTML = '<div class="row"><span class="muted">Aucun livre disponible.</span></div>');
 
-        const owned = new Set(accountBooks.flatMap(b => [b.id, b.publicId].filter(Boolean)));
+        const owned = new Set(accountBooks.flatMap(b => [b.id, b.publicId, `book_${slugifyTitle(b.title)}`].filter(Boolean)));
         list.innerHTML = '';
         Object.values(data).sort((a, b) => (b.publishedAt || 0) - (a.publishedAt || 0)).forEach(pub => {
-            const has = owned.has(pub.id) || owned.has(pub.localId);
+            const stableId = cleanKey(pub.localId || `book_${slugifyTitle(pub.title)}`);
+            const has = owned.has(pub.id) || owned.has(pub.localId) || owned.has(stableId);
             const row = document.createElement('div');
             row.className = 'row';
             row.innerHTML = `
@@ -809,17 +881,17 @@ async function openCommunity() {
             if (!has) btn.onclick = async () => {
                 btn.disabled = true;
                 btn.textContent = "...";
-                const chaps = (Array.isArray(pub.chapters) ? pub.chapters : Object.values(pub.chapters || {})).filter(c => c && c.text);
+                const chaps = toArray(pub.chapters).filter(c => c && c.text);
                 if (!chaps.length) {
                     btn.disabled = false;
                     btn.textContent = "+ Ajouter";
                     return alert("Livre vide.");
                 }
                 const ok = await saveBookCloud({
-                    id: cleanKey(pub.localId || pub.id), publicId: pub.id, title: pub.title, fileName: pub.fileName,
+                    id: stableId, publicId: pub.id, title: pub.title, fileName: pub.fileName,
                     visibility: 'public', sharedBy: pub.sharedBy, chapters: chaps, readChapters: [], pausedPositions: {}, lastIndex: 0, updatedAt: Date.now()
                 });
-                if (ok) { renderLibrary(cleanKey(pub.localId || pub.id)); btn.textContent = "Ajouté"; }
+                if (ok) { renderLibrary(stableId); btn.textContent = "Ajouté"; }
                 else { btn.disabled = false; btn.textContent = "+ Ajouter"; }
             };
             list.appendChild(row);
@@ -897,7 +969,6 @@ document.querySelectorAll('[data-close]').forEach(btn => btn.onclick = () => {
 });
 document.querySelectorAll('.modal-bg').forEach(ov => ov.onclick = e => { if (e.target === ov) ov.hidden = true; });
 
-// Re-synchronise automatiquement depuis Firebase quand on revient sur l'appareil/onglet
 document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && syncKey && !$('setup-screen').hidden) {
         pullAccount(true);
