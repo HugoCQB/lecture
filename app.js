@@ -9,7 +9,7 @@ const DEFAULT_API_KEY = (typeof ENV !== 'undefined' && ENV.DEFAULT_GEMINI_API_KE
     : "";
 
 // ÉTAT DE L'APPLICATION & BIBLIOTHÈQUE
-let activeBook = null; // { id, publicId, title, fileName, visibility, sharedBy, chapters, readChapters: [], pausedPositions: {}, lastIndex: 0 }
+let activeBook = null; // { id, storageKey, ownerKey, publicId, title, fileName, visibility, sharedBy, chapters, readChapters: [], pausedPositions: {}, lastIndex: 0 }
 let currentChapterIndex = 0;
 let activeText = "";
 let activeChapterLabel = "";
@@ -33,6 +33,18 @@ if (typeof userStats.totalChaptersRead !== "number") {
 }
 if (typeof userStats.streakDays !== "number") {
     userStats.streakDays = 0;
+}
+
+function getCurrentOwnerKey() {
+    return syncKey || "local_default";
+}
+
+function makeScopedStorageKey(ownerKey, bookId) {
+    return `${ownerKey}::${bookId}`;
+}
+
+function getActiveBookPrefKey() {
+    return `focus_read_active_book_id_${getCurrentOwnerKey()}`;
 }
 
 // ==========================================
@@ -103,10 +115,10 @@ function calculateQuestionCount(wordCount) {
 }
 
 // ==========================================
-// 3. BASE DE DONNÉES LOCALE (INDEXEDDB)
+// 3. BASE DE DONNÉES LOCALE ISOLÉE PAR CLÉ (INDEXEDDB)
 // ==========================================
 
-const DB_NAME = "FocusReadLibraryDB";
+const DB_NAME = "FocusReadLibraryDB_v2";
 const DB_VERSION = 1;
 const STORE_NAME = "books";
 
@@ -116,7 +128,7 @@ function openLibraryDB() {
         req.onupgradeneeded = e => {
             const db = e.target.result;
             if (!db.objectStoreNames.contains(STORE_NAME)) {
-                db.createObjectStore(STORE_NAME, { keyPath: "id" });
+                db.createObjectStore(STORE_NAME, { keyPath: "storageKey" });
             }
         };
         req.onsuccess = e => resolve(e.target.result);
@@ -125,6 +137,10 @@ function openLibraryDB() {
 }
 
 async function dbSaveBook(bookRecord) {
+    const owner = bookRecord.ownerKey || getCurrentOwnerKey();
+    bookRecord.ownerKey = owner;
+    bookRecord.storageKey = makeScopedStorageKey(owner, bookRecord.id);
+
     const db = await openLibraryDB();
     return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readwrite");
@@ -134,31 +150,39 @@ async function dbSaveBook(bookRecord) {
     });
 }
 
-async function dbGetAllBooks() {
+async function dbGetAllBooksForCurrentKey() {
+    const owner = getCurrentOwnerKey();
     const db = await openLibraryDB();
     return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readonly");
         const req = tx.objectStore(STORE_NAME).getAll();
-        req.onsuccess = () => resolve(req.result || []);
+        req.onsuccess = () => {
+            const all = req.result || [];
+            resolve(all.filter(b => b.ownerKey === owner));
+        };
         req.onerror = e => reject(e.target.error);
     });
 }
 
 async function dbGetBook(id) {
+    const owner = getCurrentOwnerKey();
+    const storageKey = makeScopedStorageKey(owner, id);
     const db = await openLibraryDB();
     return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readonly");
-        const req = tx.objectStore(STORE_NAME).get(id);
+        const req = tx.objectStore(STORE_NAME).get(storageKey);
         req.onsuccess = () => resolve(req.result || null);
         req.onerror = e => reject(e.target.error);
     });
 }
 
 async function dbDeleteBook(id) {
+    const owner = getCurrentOwnerKey();
+    const storageKey = makeScopedStorageKey(owner, id);
     const db = await openLibraryDB();
     return new Promise((resolve, reject) => {
         const tx = db.transaction(STORE_NAME, "readwrite");
-        tx.objectStore(STORE_NAME).delete(id);
+        tx.objectStore(STORE_NAME).delete(storageKey);
         tx.oncomplete = () => resolve();
         tx.onerror = e => reject(e.target.error);
     });
@@ -248,6 +272,7 @@ async function handleFileUpload(event) {
 
         const bookRecord = {
             id: bookId,
+            ownerKey: getCurrentOwnerKey(),
             publicId: existing?.publicId || null,
             title: bookTitle,
             fileName: file.name,
@@ -269,9 +294,10 @@ async function handleFileUpload(event) {
         }
 
         await dbSaveBook(bookRecord);
-        localStorage.setItem("focus_read_active_book_id", bookId);
+        localStorage.setItem(getActiveBookPrefKey(), bookId);
 
         await refreshLibraryUI(bookId);
+        await pushLibraryToCloud();
         label.innerText = `Importer EPUB / TXT`;
         $('file-input').value = '';
     } catch (err) {
@@ -448,7 +474,7 @@ async function deletePublicBookFromFirebase(bookRecord) {
 }
 
 async function refreshLibraryUI(selectedBookId = null) {
-    const books = await dbGetAllBooks();
+    const books = await dbGetAllBooksForCurrentKey();
     books.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
     const libBox = $('library-box');
@@ -464,7 +490,7 @@ async function refreshLibraryUI(selectedBookId = null) {
     }
 
     libBox.style.display = 'block';
-    const targetId = selectedBookId || localStorage.getItem("focus_read_active_book_id") || books[0].id;
+    const targetId = selectedBookId || localStorage.getItem(getActiveBookPrefKey()) || books[0].id;
     const foundBook = books.find(b => b.id === targetId) || books[0];
 
     libList.innerHTML = '';
@@ -493,7 +519,7 @@ async function refreshLibraryUI(selectedBookId = null) {
         `;
 
         item.querySelector('.lib-info').onclick = async () => {
-            localStorage.setItem("focus_read_active_book_id", book.id);
+            localStorage.setItem(getActiveBookPrefKey(), book.id);
             await refreshLibraryUI(book.id);
         };
 
@@ -510,6 +536,7 @@ async function refreshLibraryUI(selectedBookId = null) {
                         const ok = await publishBookToPublicLibrary(book);
                         if (ok) {
                             await dbSaveBook(book);
+                            await pushLibraryToCloud();
                         } else {
                             book.visibility = 'private';
                         }
@@ -522,6 +549,7 @@ async function refreshLibraryUI(selectedBookId = null) {
                         await deletePublicBookFromFirebase(book);
                         book.visibility = 'private';
                         await dbSaveBook(book);
+                        await pushLibraryToCloud();
                         await refreshLibraryUI(book.id);
                     }
                 }
@@ -532,13 +560,14 @@ async function refreshLibraryUI(selectedBookId = null) {
             e.stopPropagation();
             const msg = (isPublic && isOwner)
                 ? `Supprimer "${book.title}" de votre bibliothèque et de la bibliothèque commune ?`
-                : `Supprimer "${book.title}" de votre bibliothèque locale ?`;
+                : `Supprimer "${book.title}" de votre bibliothèque ?`;
 
             if (confirm(msg)) {
                 await dbDeleteBook(book.id);
                 if (isPublic && isOwner) {
                     await deletePublicBookFromFirebase(book);
                 }
+                await pushLibraryToCloud();
                 await refreshLibraryUI();
             }
         };
@@ -618,7 +647,7 @@ async function ouvrirBibliothequeCommune() {
     try {
         const [res, localBooks] = await Promise.all([
             fetch(`${FIREBASE_DB_URL}/focus_read_public_books.json`),
-            dbGetAllBooks()
+            dbGetAllBooksForCurrentKey()
         ]);
 
         if (!res.ok) throw new Error("Impossible d'accéder à la bibliothèque commune");
@@ -685,6 +714,7 @@ async function telechargerLivrePublic(pubBook) {
     const localBookId = pubBook.localId || pubBook.id;
     const bookRecord = {
         id: localBookId,
+        ownerKey: getCurrentOwnerKey(),
         publicId: pubBook.id,
         title: pubBook.title,
         fileName: pubBook.fileName || `${pubBook.title}.epub`,
@@ -698,8 +728,9 @@ async function telechargerLivrePublic(pubBook) {
     };
 
     await dbSaveBook(bookRecord);
-    localStorage.setItem("focus_read_active_book_id", bookRecord.id);
+    localStorage.setItem(getActiveBookPrefKey(), bookRecord.id);
     await refreshLibraryUI(bookRecord.id);
+    await pushLibraryToCloud();
 }
 
 // ==========================================
@@ -748,6 +779,7 @@ async function pauseReadingSession() {
         activeBook.pausedPositions[chap.id] = viewport.scrollTop;
         activeBook.updatedAt = Date.now();
         await dbSaveBook(activeBook);
+        await pushLibraryToCloud();
     }
 
     $('game-screen').style.display = 'none';
@@ -928,6 +960,7 @@ async function evaluateQuiz() {
     saveLocalStats();
     renderGlobalStatsUI();
     await pushToCloud();
+    await pushLibraryToCloud();
 
     $('submit-quiz-btn').style.display = 'none';
     $('restart-btn').style.display = 'block';
@@ -968,7 +1001,7 @@ async function resetToMenu() {
 }
 
 // ==========================================
-// 10. FIREBASE SYNC & CLASSEMENT PAR CLÉ
+// 10. FIREBASE SYNC (STATS + BIBLIOTHÈQUE PROPRE À LA CLÉ)
 // ==========================================
 
 function saveLocalStats() {
@@ -1011,6 +1044,104 @@ function genererNouvelleCle() {
     return "READ-" + Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
+async function pushLibraryToCloud() {
+    if (!navigator.onLine || !syncKey) return;
+
+    try {
+        const checkRes = await fetch(`${FIREBASE_DB_URL}/focus_read_users/${encodeURIComponent(syncKey)}/passwordHash.json`);
+        if (checkRes.ok) {
+            const distantHash = await checkRes.json();
+            if (distantHash) {
+                const localHash = await hashPassword(currentKeyPassword);
+                if (distantHash !== localHash) return;
+            }
+        }
+
+        const localBooks = await dbGetAllBooksForCurrentKey();
+        const libraryPayload = {};
+
+        localBooks.forEach(book => {
+            libraryPayload[book.id] = {
+                id: book.id,
+                publicId: book.publicId || null,
+                title: book.title,
+                fileName: book.fileName,
+                visibility: book.visibility || 'public',
+                sharedBy: book.sharedBy || syncKey,
+                chapters: book.chapters,
+                readChapters: book.readChapters || [],
+                pausedPositions: book.pausedPositions || {},
+                lastIndex: book.lastIndex || 0,
+                updatedAt: book.updatedAt || Date.now()
+            };
+        });
+
+        await fetch(`${FIREBASE_DB_URL}/focus_read_users/${encodeURIComponent(syncKey)}/library.json`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(libraryPayload)
+        });
+    } catch (e) {
+        console.error("Erreur sync bibliothèque cloud:", e);
+    }
+}
+
+async function mergeCloudLibraryForCurrentKey(cloudLibraryObj) {
+    const owner = getCurrentOwnerKey();
+    const localBooks = await dbGetAllBooksForCurrentKey();
+    const localMap = new Map(localBooks.map(b => [b.id, b]));
+    let hasLocalOnlyChanges = false;
+
+    if (cloudLibraryObj && typeof cloudLibraryObj === 'object') {
+        for (const [bookId, cloudBook] of Object.entries(cloudLibraryObj)) {
+            if (!cloudBook || !Array.isArray(cloudBook.chapters)) continue;
+            const localBook = localMap.get(bookId);
+
+            if (!localBook) {
+                await dbSaveBook({
+                    ...cloudBook,
+                    id: bookId,
+                    ownerKey: owner,
+                    readChapters: cloudBook.readChapters || [],
+                    pausedPositions: cloudBook.pausedPositions || {}
+                });
+            } else {
+                const mergedRead = Array.from(new Set([
+                    ...(localBook.readChapters || []),
+                    ...(cloudBook.readChapters || [])
+                ]));
+
+                const useCloudState = (cloudBook.updatedAt || 0) > (localBook.updatedAt || 0);
+                const mergedBook = {
+                    ...localBook,
+                    visibility: useCloudState ? (cloudBook.visibility || localBook.visibility) : localBook.visibility,
+                    readChapters: mergedRead,
+                    pausedPositions: useCloudState ? (cloudBook.pausedPositions || {}) : (localBook.pausedPositions || {}),
+                    lastIndex: useCloudState ? (cloudBook.lastIndex ?? localBook.lastIndex) : localBook.lastIndex,
+                    updatedAt: Math.max(localBook.updatedAt || 0, cloudBook.updatedAt || 0)
+                };
+
+                await dbSaveBook(mergedBook);
+                if (mergedRead.length > (cloudBook.readChapters || []).length || !useCloudState) {
+                    hasLocalOnlyChanges = true;
+                }
+            }
+        }
+    }
+
+    const cloudIds = new Set(Object.keys(cloudLibraryObj || {}));
+    for (const localBook of localBooks) {
+        if (!cloudIds.has(localBook.id)) {
+            hasLocalOnlyChanges = true;
+        }
+    }
+
+    await refreshLibraryUI();
+    if (hasLocalOnlyChanges) {
+        await pushLibraryToCloud();
+    }
+}
+
 async function changerOuCopierCle() {
     const action = prompt(
         `Clé actuelle (votre nom dans le classement) : ${syncKey || "Aucune"}\n\n` +
@@ -1038,12 +1169,14 @@ async function changerOuCopierCle() {
         }
         updateSyncKeyUI();
         await pushToCloud();
+        await pushLibraryToCloud();
         return;
     }
 
     let rawNouvelleCle = (saisie === "1") ? (prompt("Entrez le nom de votre clé :") || "") : saisie;
     let nouvelleCle = sanitizeFirebaseKey(rawNouvelleCle);
 
+    // Réinitialisation des stats pour la nouvelle session de clé
     userStats = {
         scoreTotal: 0,
         quizzesCompleted: 0,
@@ -1061,6 +1194,7 @@ async function changerOuCopierCle() {
         localStorage.removeItem("focus_read_sync_pwd");
         localStorage.setItem("focus_read_sync_key", syncKey);
         updateSyncKeyUI();
+        await refreshLibraryUI(); // Bibliothèque vierge immédiate
         await pushToCloud();
         return;
     }
@@ -1070,6 +1204,7 @@ async function changerOuCopierCle() {
     localStorage.removeItem("focus_read_sync_pwd");
     localStorage.setItem("focus_read_sync_key", syncKey);
     updateSyncKeyUI();
+    await refreshLibraryUI(); // Affiche uniquement les livres locaux de cette clé en attendant le cloud
     await pullFromCloud();
 }
 
@@ -1083,6 +1218,7 @@ async function pullFromCloud() {
         syncKey = genererNouvelleCle();
         localStorage.setItem("focus_read_sync_key", syncKey);
         updateSyncKeyUI();
+        await refreshLibraryUI();
         await pushToCloud();
         return;
     }
@@ -1095,6 +1231,7 @@ async function pullFromCloud() {
         const payload = await res.json();
         if (!payload) {
             await pushToCloud();
+            await pushLibraryToCloud();
             return;
         }
 
@@ -1146,6 +1283,9 @@ async function pullFromCloud() {
 
         saveLocalStats();
         renderGlobalStatsUI();
+
+        // Synchronise et affiche uniquement la bibliothèque propre à cette clé
+        await mergeCloudLibraryForCurrentKey(payload.library || {});
         updateSyncStatus("À jour", true);
     } catch (e) {
         console.error("Erreur lecture Firebase:", e);
@@ -1184,8 +1324,9 @@ async function pushToCloud() {
             updatedAt: Date.now()
         };
 
+        // PATCH préserve le sous-nœud /library existant dans Firebase
         const res = await fetch(`${FIREBASE_DB_URL}/focus_read_users/${encodeURIComponent(syncKey)}.json`, {
-            method: "PUT",
+            method: "PATCH",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload)
         });
@@ -1276,16 +1417,12 @@ $('btnLeaderboard').addEventListener('click', ouvrirClassement);
 $('btnCloseLeaderboard').addEventListener('click', () => $('leaderboard-overlay').classList.add('hidden'));
 
 // Enregistrement du Service Worker PWA
-
-
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
         navigator.serviceWorker.register('./sw.js').then(reg => {
-            // Vérifie s'il y a une mise à jour à chaque ouverture
             reg.update();
         }).catch(err => console.warn('SW non enregistré:', err));
 
-        // Recharge automatiquement la page dès que le nouveau Service Worker est actif
         let refreshing = false;
         navigator.serviceWorker.addEventListener('controllerchange', () => {
             if (!refreshing) {
@@ -1302,5 +1439,5 @@ if ('serviceWorker' in navigator) {
     updateSyncKeyUI();
     renderGlobalStatsUI();
     await refreshLibraryUI();
-    pullFromCloud();
+    await pullFromCloud();
 })();
