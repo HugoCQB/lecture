@@ -577,9 +577,9 @@ function renderAccountLibraryUI(selectedBookId = null) {
                 </span>
             </div>
             <div class="lib-actions">
-                ${!isPublic ? `<button class="lib-del-btn btn-toggle-vis" title="Rendre public">Passer public</button>` : ""}
-                ${(isPublic && isOwner) ? `<button class="lib-del-btn btn-toggle-vis" title="Garder uniquement sur votre compte">Passer privé</button>` : ""}
-                <button class="lib-del-btn btn-del-book" title="Supprimer">Suppr.</button>
+                ${!isPublic ? `<button type="button" class="lib-action-btn btn-toggle-vis" title="Rendre public">🌐 Passer public</button>` : ""}
+                ${(isPublic && isOwner) ? `<button type="button" class="lib-action-btn btn-toggle-vis" title="Garder uniquement sur votre compte">🔒 Passer privé</button>` : ""}
+                <button type="button" class="lib-action-btn danger btn-del-book" title="Supprimer ce livre">Supprimer</button>
             </div>
         `;
 
@@ -848,7 +848,7 @@ async function pauseReadingSession() {
 
     $('game-screen').style.display = 'none';
     $('quiz-screen').style.display = 'none';
-    $('setup-screen').style.display = 'block';
+    $('setup-screen').style.display = window.innerWidth <= 600 ? 'flex' : 'block';
     renderAccountLibraryUI(activeBook.id);
 }
 
@@ -936,7 +936,7 @@ async function generateQuizFromText(apiKey, text, questionCount) {
 
 function showQuizScreen() {
     $('game-screen').style.display = 'none';
-    $('quiz-screen').style.display = 'block';
+    $('quiz-screen').style.display = window.innerWidth <= 600 ? 'flex' : 'block';
     $('quiz-title').innerText = `Vérification · ${generatedQuiz.length} questions`;
     $('submit-quiz-btn').style.display = 'block';
     $('retry-chapter-btn').style.display = 'none';
@@ -1094,7 +1094,7 @@ async function launchNextChapter() {
 function resetToMenu() {
     $('game-screen').style.display = 'none';
     $('quiz-screen').style.display = 'none';
-    $('setup-screen').style.display = 'block';
+    $('setup-screen').style.display = window.innerWidth <= 600 ? 'flex' : 'block';
     renderGlobalStatsUI();
     renderAccountLibraryUI(activeBook ? activeBook.id : null);
 }
@@ -1410,8 +1410,14 @@ $('restart-btn').addEventListener('click', resetToMenu);
 $('btnSyncKey').addEventListener('click', changerOuCopierCle);
 $('btnCommunity').addEventListener('click', ouvrirBibliothequeCommune);
 $('btnCloseCommunity').addEventListener('click', () => $('community-overlay').classList.add('hidden'));
+$('community-overlay').addEventListener('click', e => {
+    if (e.target === $('community-overlay')) $('community-overlay').classList.add('hidden');
+});
 $('btnLeaderboard').addEventListener('click', ouvrirClassement);
 $('btnCloseLeaderboard').addEventListener('click', () => $('leaderboard-overlay').classList.add('hidden'));
+$('leaderboard-overlay').addEventListener('click', e => {
+    if (e.target === $('leaderboard-overlay')) $('leaderboard-overlay').classList.add('hidden');
+});
 
 // Enregistrement du Service Worker PWA
 if ('serviceWorker' in navigator) {
