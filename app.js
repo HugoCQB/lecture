@@ -728,39 +728,46 @@ async function openLeaderboard() {
 
 // --- ÉVÉNEMENTS & INIT ---
 
+// --- ÉVÉNEMENTS & INIT ---
+
+const on = (id, ev, fn) => { const el = $(id); if (el) el[ev] = fn; };
+
 const updateApiTag = () => {
-    const ok = Boolean($('api-key').value.trim() || DEFAULT_API_KEY);
-    $('api-status-tag').textContent = ok ? "OK" : "Requise";
-    if (!ok) $('api-details-box').open = true;
+    const ok = Boolean($('api-key')?.value.trim() || DEFAULT_API_KEY);
+    if ($('api-status-tag')) $('api-status-tag').textContent = ok ? "OK" : "Requise";
+    if (!ok && $('api-details-box')) $('api-details-box').open = true;
 };
 
-$('api-key').oninput = e => {
+on('api-key', 'oninput', e => {
     const v = e.target.value.trim();
     v ? localStorage.setItem("focus_read_gemini_key", v) : localStorage.removeItem("focus_read_gemini_key");
     updateApiTag();
-};
+});
 
-$('file-drop-zone').onclick = () => $('file-input').click();
-$('file-input').onchange = handleFileUpload;
-$('chapter-select').onchange = e => selectChapter(e.target.value, true);
+on('file-drop-zone', 'onclick', () => $('file-input')?.click());
+on('file-input', 'onchange', handleFileUpload);
+on('chapter-select', 'onchange', e => selectChapter(e.target.value, true));
 
-$('start-btn').onclick = startReading;
-$('pause-reading-btn').onclick = pauseReading;
+on('start-btn', 'onclick', startReading);
+on('pause-reading-btn', 'onclick', pauseReading);
 window.addEventListener('scroll', updateScroll, { passive: true });
-$('finish-reading-btn').onclick = finishAndQuiz;
+on('finish-reading-btn', 'onclick', finishAndQuiz);
 
-$('abandon-quiz-btn').onclick = () => confirm("Abandonner le quiz ?") && (showView('setup-screen'), renderLibrary(activeBook?.id));
-$('submit-quiz-btn').onclick = evaluateQuiz;
-$('retry-chapter-btn').onclick = startReading;
-$('next-chapter-btn').onclick = async () => { await selectChapter(currentChapterIndex + 1, true); startReading(); };
-$('restart-btn').onclick = () => { showView('setup-screen'); renderLibrary(activeBook?.id); };
+on('abandon-quiz-btn', 'onclick', () => confirm("Abandonner le quiz ?") && (showView('setup-screen'), renderLibrary(activeBook?.id)));
+on('submit-quiz-btn', 'onclick', evaluateQuiz);
+on('retry-chapter-btn', 'onclick', startReading);
+on('next-chapter-btn', 'onclick', async () => { await selectChapter(currentChapterIndex + 1, true); startReading(); });
+on('restart-btn', 'onclick', () => { showView('setup-screen'); renderLibrary(activeBook?.id); });
 
-$('btnSyncKey').onclick = switchAccount;
-$('btnTutorial').onclick = () => $('tutorial-overlay').hidden = false;
-$('btnCommunity').onclick = openCommunity;
-$('btnLeaderboard').onclick = openLeaderboard;
+on('btnSyncKey', 'onclick', switchAccount);
+on('btnTutorial', 'onclick', () => { if ($('tutorial-overlay')) $('tutorial-overlay').hidden = false; });
+on('btnCommunity', 'onclick', openCommunity);
+on('btnLeaderboard', 'onclick', openLeaderboard);
 
-document.querySelectorAll('[data-close]').forEach(btn => btn.onclick = () => $(btn.dataset.close).hidden = true);
+document.querySelectorAll('[data-close]').forEach(btn => btn.onclick = () => {
+    const target = $(btn.dataset.close);
+    if (target) target.hidden = true;
+});
 document.querySelectorAll('.overlay').forEach(ov => ov.onclick = e => { if (e.target === ov) ov.hidden = true; });
 
 if ('serviceWorker' in navigator) {
@@ -768,7 +775,7 @@ if ('serviceWorker' in navigator) {
 }
 
 (async () => {
-    $('api-key').value = localStorage.getItem("focus_read_gemini_key") || DEFAULT_API_KEY;
+    if ($('api-key')) $('api-key').value = localStorage.getItem("focus_read_gemini_key") || DEFAULT_API_KEY;
     updateApiTag();
     updateAccountUI();
     renderStats();
