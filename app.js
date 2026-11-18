@@ -1,6 +1,5 @@
 const $ = id => document.getElementById(id);
 
-// Chargement depuis config.js (équivalent .env)
 const FIREBASE_DB_URL = (typeof ENV !== 'undefined' && ENV.FIREBASE_DB_URL) 
     ? ENV.FIREBASE_DB_URL 
     : "https://antibrainrotting-4f194-default-rtdb.europe-west1.firebasedatabase.app";
@@ -9,9 +8,42 @@ const DEFAULT_API_KEY = (typeof ENV !== 'undefined' && ENV.DEFAULT_GEMINI_API_KE
     ? ENV.DEFAULT_GEMINI_API_KEY 
     : "";
 
-// ÉTAT DE L'APPLICATION
-let currentMode = 'ai';
+// CONFIGURATION DIFFICULTÉ & TAILLE DES SEGMENTS
+const DIFFICULTY_CONFIG = {
+    easy: {
+        label: "FACILE",
+        questionCount: 3,
+        choicesCount: 3,
+        multiplier: 1,
+        promptRule: "Pose 3 questions simples et directes sur les événements ou idées principales du texte, avec 3 choix de réponse chacune."
+    },
+    medium: {
+        label: "MOYEN",
+        questionCount: 4,
+        choicesCount: 3,
+        multiplier: 1.5,
+        promptRule: "Pose 4 questions précises portant sur des détails concrets et des faits secondaires du texte, avec 3 choix de réponse chacune."
+    },
+    hard: {
+        label: "DIFFICILE",
+        questionCount: 5,
+        choicesCount: 4,
+        multiplier: 2,
+        promptRule: "Pose 5 questions exigeantes et pointues (détails subtils, chronologie exacte, déductions fines, pièges plausibles) avec 4 choix de réponse chacune."
+    }
+};
+
+const LENGTH_CONFIG = {
+    short: { maxWordsPerPart: 250 },
+    medium: { maxWordsPerPart: 550 },
+    long: { maxWordsPerPart: 950 }
+};
+
+// ÉTAT DE L'APPLICATION & BIBLIOTHÈQUE
+let activeBook = null; // { id, title, fileName, rawChapters, chapters, readChapters: [], lastIndex: 0 }
+let currentChapterIndex = 0;
 let activeText = "";
+let activeChapterLabel = "";
 let generatedQuiz = [];
 let userAnswers = {};
 
@@ -19,82 +51,222 @@ let userAnswers = {};
 let syncKey = localStorage.getItem("focus_read_sync_key") || null;
 let currentKeyPassword = localStorage.getItem("focus_read_sync_pwd") || "";
 let userStats = JSON.parse(localStorage.getItem("focus_read_stats") || "null") || {
-    pseudo: "Lecteur",
     scoreTotal: 0,
     quizzesCompleted: 0,
     perfectScores: 0
 };
 
-const fallbackData = {
-    text: "Depuis trois semaines, la mer n'a pas rendu un seul navire à l'horizon. Le gardien note chaque heure dans son registre humide, écoutant le vent frapper la vitre épaisse. Ici, le silence n'est jamais total ; il ressemble plutôt à une respiration lente derrière les murs de pierre.\n\nHier soir, une sirène lointaine a déchiré la brume, mais ce n'était qu'une illusion sonore. La science explique ces mirages auditifs par l'isolement prolongé. Pourtant, lorsque le calme retombe sur la tour de granit, il devient impossible de détacher son regard de l'obscurité. Chaque ombre sur l'escalier en colimaçon semble attendre un mouvement, une preuve que le monde extérieur existe encore au-delà de l'océan.",
-    quiz: [
-        {
-            question: "Depuis combien de temps le gardien n'a-t-il vu aucun navire ?",
-            options: ["Trois jours", "Trois semaines", "Trois mois"],
-            answer: 1
-        },
-        {
-            question: "En quoi la tour du phare est-elle construite ?",
-            options: ["En bois", "En brique", "En granit"],
-            answer: 2
-        },
-        {
-            question: "Comment le texte explique-t-il la sirène entendue hier soir ?",
-            options: ["Un bateau en détresse", "Un mirage auditif dû à l'isolement", "Le bruit du vent dans l'escalier"],
-            answer: 1
-        }
-    ]
-};
-
 // ==========================================
-// 1. GESTION DES ONGLETS & IMPORT EPUB / TXT
+// 1. BASE DE DONNÉES LOCALE (INDEXEDDB)
 // ==========================================
 
-function switchTab(mode) {
-    currentMode = mode;
-    $('tab-ai').classList.toggle('active', mode === 'ai');
-    $('tab-file').classList.toggle('active', mode === 'file');
-    $('mode-ai').style.display = mode === 'ai' ? 'block' : 'none';
-    $('mode-file').style.display = mode === 'file' ? 'block' : 'none';
+const DB_NAME = "FocusReadLibraryDB";
+const DB_VERSION = 1;
+const STORE_NAME = "books";
+
+function openLibraryDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, DB_VERSION);
+        req.onupgradeneeded = e => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(STORE_NAME)) {
+                db.createObjectStore(STORE_NAME, { keyPath: "id" });
+            }
+        };
+        req.onsuccess = e => resolve(e.target.result);
+        req.onerror = e => reject(e.target.error);
+    });
 }
+
+async function dbSaveBook(bookRecord) {
+    const db = await openLibraryDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        tx.objectStore(STORE_NAME).put(bookRecord);
+        tx.oncomplete = () => resolve();
+        tx.onerror = e => reject(e.target.error);
+    });
+}
+
+async function dbGetAllBooks() {
+    const db = await openLibraryDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const req = tx.objectStore(STORE_NAME).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = e => reject(e.target.error);
+    });
+}
+
+async function dbGetBook(id) {
+    const db = await openLibraryDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const req = tx.objectStore(STORE_NAME).get(id);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = e => reject(e.target.error);
+    });
+}
+
+async function dbDeleteBook(id) {
+    const db = await openLibraryDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        tx.objectStore(STORE_NAME).delete(id);
+        tx.oncomplete = () => resolve();
+        tx.onerror = e => reject(e.target.error);
+    });
+}
+
+// ==========================================
+// 2. PRÉFÉRENCES LOCALES (CLÉ GEMINI, DIFFICULTÉ, TAILLE)
+// ==========================================
+
+function loadLocalPreferences() {
+    const savedKey = localStorage.getItem("focus_read_gemini_key");
+    if (savedKey) {
+        $('api-key').value = savedKey;
+    } else if (DEFAULT_API_KEY) {
+        $('api-key').value = DEFAULT_API_KEY;
+    }
+
+    const savedDiff = localStorage.getItem("focus_read_difficulty");
+    if (savedDiff && DIFFICULTY_CONFIG[savedDiff]) {
+        $('difficulty').value = savedDiff;
+    }
+
+    const savedLen = localStorage.getItem("focus_read_length");
+    if (savedLen && LENGTH_CONFIG[savedLen]) {
+        $('text-length').value = savedLen;
+    }
+}
+
+function saveGeminiKey(val) {
+    const trimmed = val.trim();
+    if (trimmed) {
+        localStorage.setItem("focus_read_gemini_key", trimmed);
+    } else {
+        localStorage.removeItem("focus_read_gemini_key");
+    }
+}
+
+// ==========================================
+// 3. IMPORTATION EPUB / TXT & GESTION BIBLIOTHÈQUE
+// ==========================================
 
 async function handleFileUpload(event) {
     const file = event.target.files[0];
     if (!file) return;
 
     const label = $('file-label');
-    label.innerText = `Extraction de "${file.name}"...`;
+    label.innerText = `Analyse et sauvegarde de "${file.name}"...`;
 
     try {
-        let extracted = "";
+        const bookId = `book_${file.name}_${file.size}`;
+        let bookTitle = file.name.replace(/\.(epub|txt)$/i, '');
+        let rawChapters = [];
+
         if (file.name.toLowerCase().endsWith('.epub')) {
-            extracted = await extractTextFromEPUB(file);
+            const epubData = await extractRawChaptersFromEPUB(file);
+            bookTitle = epubData.bookTitle;
+            rawChapters = epubData.rawChapters;
         } else {
-            extracted = await file.text();
+            const rawTxt = await file.text();
+            const clean = rawTxt
+                .replace(/\r\n/g, '\n')
+                .replace(/[ \t]+/g, ' ')
+                .replace(/\n{3,}/g, '\n\n')
+                .trim();
+            if (clean.length < 30) throw new Error("Le fichier texte est trop court.");
+            rawChapters = [{ chapterNum: 1, title: bookTitle, text: clean }];
         }
 
-        // Nettoyage des espaces multiples tout en gardant les sauts de paragraphe
-        extracted = extracted
-            .replace(/\r\n/g, '\n')
-            .replace(/[ \t]+/g, ' ')
-            .replace(/\n{3,}/g, '\n\n')
-            .trim();
-
-        const wordsArray = extracted.split(/\s+/);
-        if (wordsArray.length > 350) {
-            extracted = wordsArray.slice(0, 350).join(' ') + "...";
+        if (rawChapters.length === 0) {
+            throw new Error("Aucun chapitre lisible trouvé dans ce fichier.");
         }
 
-        $('custom-text').value = extracted;
-        $('preview-box').style.display = 'block';
-        label.innerText = `Fichier prêt : ${file.name} (${Math.min(wordsArray.length, 350)} mots)`;
+        const segments = buildSegmentsFromRawChapters(rawChapters);
+
+        // Conserver les chapitres déjà lus si le livre existait déjà
+        const existing = await dbGetBook(bookId);
+        const readChapters = existing ? (existing.readChapters || []) : [];
+
+        const bookRecord = {
+            id: bookId,
+            title: bookTitle,
+            fileName: file.name,
+            rawChapters,
+            chapters: segments,
+            readChapters,
+            lastIndex: existing ? Math.min(existing.lastIndex || 0, segments.length - 1) : 0,
+            updatedAt: Date.now()
+        };
+
+        await dbSaveBook(bookRecord);
+        localStorage.setItem("focus_read_active_book_id", bookId);
+
+        await refreshLibraryUI(bookId);
+        label.innerText = `+ Importer un autre fichier EPUB ou TXT`;
+        $('file-input').value = '';
     } catch (err) {
-        alert("Impossible de lire ce fichier : " + err.message);
+        alert("Impossible d'importer ce fichier : " + err.message);
         label.innerText = "Erreur lors du chargement. Réessayez.";
     }
 }
 
-async function extractTextFromEPUB(file) {
+function buildSegmentsFromRawChapters(rawChapters) {
+    const lenKey = $('text-length').value || 'medium';
+    const MAX_WORDS_PER_PART = LENGTH_CONFIG[lenKey].maxWordsPerPart;
+    const segments = [];
+
+    for (const rc of rawChapters) {
+        const paragraphs = rc.text.split(/\n\n+/);
+        const totalWords = rc.text.split(/\s+/).filter(Boolean).length;
+        const titleSuffix = rc.title ? ` : ${rc.title}` : "";
+
+        if (totalWords <= MAX_WORDS_PER_PART) {
+            segments.push({
+                id: `c${rc.chapterNum}_p1`,
+                label: `Chapitre ${rc.chapterNum}${titleSuffix}`,
+                text: rc.text,
+                wordCount: totalWords
+            });
+            continue;
+        }
+
+        const parts = [];
+        let currentPart = [];
+        let currentWords = 0;
+
+        for (const p of paragraphs) {
+            const pWords = p.split(/\s+/).filter(Boolean).length;
+            if (currentWords + pWords > MAX_WORDS_PER_PART && currentPart.length > 0) {
+                parts.push(currentPart.join('\n\n'));
+                currentPart = [p];
+                currentWords = pWords;
+            } else {
+                currentPart.push(p);
+                currentWords += pWords;
+            }
+        }
+        if (currentPart.length > 0) {
+            parts.push(currentPart.join('\n\n'));
+        }
+
+        parts.forEach((partText, idx) => {
+            segments.push({
+                id: `c${rc.chapterNum}_p${idx + 1}`,
+                label: `Chapitre ${rc.chapterNum}${titleSuffix} — Partie ${idx + 1}/${parts.length}`,
+                text: partText,
+                wordCount: partText.split(/\s+/).filter(Boolean).length
+            });
+        });
+    }
+
+    return segments;
+}
+
+async function extractRawChaptersFromEPUB(file) {
     if (typeof JSZip === 'undefined') {
         throw new Error("Bibliothèque JSZip non chargée.");
     }
@@ -102,7 +274,6 @@ async function extractTextFromEPUB(file) {
     const arrayBuffer = await file.arrayBuffer();
     const zip = await JSZip.loadAsync(arrayBuffer);
 
-    // 1. Lire META-INF/container.xml pour localiser le fichier .opf
     const containerFile = zip.file("META-INF/container.xml");
     if (!containerFile) throw new Error("Fichier EPUB invalide (container.xml manquant).");
 
@@ -117,119 +288,227 @@ async function extractTextFromEPUB(file) {
     const opfContent = await zip.file(opfPath).async("text");
     const opfDoc = parser.parseFromString(opfContent, "application/xml");
 
-    // 2. Construire la carte manifest (id -> href)
+    const titleEl = opfDoc.querySelector("metadata title, dc\\:title");
+    const bookTitle = titleEl ? titleEl.textContent.trim() : file.name.replace(/\.epub$/i, '');
+
     const manifestMap = {};
     opfDoc.querySelectorAll("manifest > item").forEach(item => {
         manifestMap[item.getAttribute("id")] = item.getAttribute("href");
     });
 
-    // 3. Suivre le spine (ordre de lecture des chapitres)
     const spineItems = opfDoc.querySelectorAll("spine > itemref");
-    let fullText = "";
+    const rawChapters = [];
+    let chapterCounter = 1;
 
     for (const itemref of spineItems) {
         const idref = itemref.getAttribute("idref");
         const href = manifestMap[idref];
         if (!href) continue;
 
-        const fullChapterPath = decodeURIComponent(opfDir + href);
+        const fullChapterPath = decodeURIComponent(opfDir + href.split('#')[0]);
         const chapterFile = zip.file(fullChapterPath);
         if (!chapterFile) continue;
 
         const xhtml = await chapterFile.async("text");
         const doc = parser.parseFromString(xhtml, "text/html");
-        
-        // Supprimer les styles et scripts éventuels
-        doc.querySelectorAll("style, script").forEach(el => el.remove());
-        
-        const bodyText = doc.body ? doc.body.textContent.trim() : "";
-        if (bodyText.length > 20) {
-            fullText += bodyText + "\n\n";
+
+        doc.querySelectorAll("style, script, nav").forEach(el => el.remove());
+
+        let detectedTitle = "";
+        const heading = doc.querySelector("h1, h2, h3");
+        if (heading) {
+            detectedTitle = heading.textContent.replace(/\s+/g, ' ').trim();
+            if (/^chapitre\s*\d+/i.test(detectedTitle)) {
+                detectedTitle = detectedTitle.replace(/^chapitre\s*\d+\s*[:.-]?\s*/i, '').trim();
+            }
+            if (detectedTitle.length > 42) {
+                detectedTitle = detectedTitle.substring(0, 39) + "...";
+            }
         }
 
-        // Arrêter dès qu'on a largement assez de matière (~500 mots)
-        if (fullText.split(/\s+/).length > 500) break;
+        const blocks = Array.from(doc.querySelectorAll("p, div"))
+            .filter(el => el.children.length === 0 || el.tagName.toLowerCase() === 'p')
+            .map(el => el.textContent.replace(/\s+/g, ' ').trim())
+            .filter(txt => txt.length > 0);
+
+        let chapterText = blocks.length > 0 
+            ? blocks.join('\n\n') 
+            : (doc.body ? doc.body.textContent.replace(/\s+/g, ' ').trim() : "");
+
+        const wordCount = chapterText.split(/\s+/).filter(Boolean).length;
+        if (wordCount < 45) continue;
+
+        rawChapters.push({
+            chapterNum: chapterCounter,
+            title: detectedTitle,
+            text: chapterText
+        });
+        chapterCounter++;
     }
 
-    if (!fullText.trim()) {
-        throw new Error("Aucun texte exploitable trouvé dans cet EPUB.");
+    return { bookTitle, rawChapters };
+}
+
+async function refreshLibraryUI(selectedBookId = null) {
+    const books = await dbGetAllBooks();
+    books.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+    const libBox = $('library-box');
+    const libList = $('library-list');
+
+    if (books.length === 0) {
+        libBox.style.display = 'none';
+        $('chapter-selector-box').style.display = 'none';
+        $('preview-box').style.display = 'none';
+        $('start-btn').disabled = true;
+        $('start-btn').innerText = "Importez un livre EPUB / TXT";
+        activeBook = null;
+        return;
     }
 
-    return fullText;
+    libBox.style.display = 'block';
+    const targetId = selectedBookId || localStorage.getItem("focus_read_active_book_id") || books[0].id;
+    const foundBook = books.find(b => b.id === targetId) || books[0];
+
+    libList.innerHTML = '';
+    books.forEach(book => {
+        const total = book.chapters.length;
+        const readCount = (book.readChapters || []).filter(id => book.chapters.some(c => c.id === id)).length;
+        const pct = total > 0 ? Math.round((readCount / total) * 100) : 0;
+
+        const item = document.createElement('div');
+        item.className = `lib-item ${book.id === foundBook.id ? 'active' : ''}`;
+        item.innerHTML = `
+            <div class="lib-info">
+                <span class="lib-title">${escapeHtml(book.title)}</span>
+                <span class="lib-sub">${readCount}/${total} lus (${pct}%)</span>
+            </div>
+            <button class="lib-del-btn" title="Supprimer ce livre">SUPPR.</button>
+        `;
+
+        item.querySelector('.lib-info').onclick = async () => {
+            localStorage.setItem("focus_read_active_book_id", book.id);
+            await refreshLibraryUI(book.id);
+        };
+
+        item.querySelector('.lib-del-btn').onclick = async (e) => {
+            e.stopPropagation();
+            if (confirm(`Supprimer "${book.title}" de votre bibliothèque locale ?`)) {
+                await dbDeleteBook(book.id);
+                await refreshLibraryUI();
+            }
+        };
+
+        libList.appendChild(item);
+    });
+
+    loadActiveBookIntoUI(foundBook);
+}
+
+function loadActiveBookIntoUI(book) {
+    activeBook = book;
+    const total = book.chapters.length;
+    const readSet = new Set(book.readChapters || []);
+    const readCount = book.chapters.filter(c => readSet.has(c.id)).length;
+    const pct = total > 0 ? Math.round((readCount / total) * 100) : 0;
+
+    $('book-title-label').innerText = book.title;
+    $('book-progress-text').innerText = `${readCount}/${total} LUS (${pct}%)`;
+    $('book-progress-bar-fill').style.width = `${pct}%`;
+
+    // Sélectionner par défaut le dernier chapitre utilisé, ou le premier non lu
+    let defaultIdx = book.lastIndex || 0;
+    if (defaultIdx >= total) defaultIdx = 0;
+
+    const select = $('chapter-select');
+    select.innerHTML = '';
+    book.chapters.forEach((chap, idx) => {
+        const isRead = readSet.has(chap.id);
+        const statusTag = isRead ? "[✓ LU] " : "[À LIRE] ";
+        const opt = document.createElement('option');
+        opt.value = idx;
+        opt.textContent = `${statusTag}${chap.label} (${chap.wordCount} mots)`;
+        select.appendChild(opt);
+    });
+
+    $('chapter-selector-box').style.display = 'block';
+    $('preview-box').style.display = 'block';
+    $('start-btn').disabled = false;
+
+    selectChapter(defaultIdx);
+}
+
+async function selectChapter(index) {
+    if (!activeBook) return;
+    currentChapterIndex = parseInt(index, 10) || 0;
+    const chap = activeBook.chapters[currentChapterIndex];
+    if (!chap) return;
+
+    $('chapter-select').value = currentChapterIndex;
+    $('custom-text').value = chap.text;
+    activeChapterLabel = chap.label.toUpperCase();
+
+    const isAlreadyRead = (activeBook.readChapters || []).includes(chap.id);
+    $('start-btn').innerText = isAlreadyRead ? "Relire ce chapitre" : "Commencer la lecture";
+
+    activeBook.lastIndex = currentChapterIndex;
+    await dbSaveBook(activeBook);
 }
 
 // ==========================================
-// 2. GÉNÉRATION IA (GEMINI) & LECTURE LIBRE
+// 4. GÉNÉRATION DU QUIZ IA (GEMINI) & LECTURE
 // ==========================================
 
 async function initGame() {
+    if (!activeBook) {
+        alert("Veuillez d'abord importer un livre EPUB ou TXT.");
+        return;
+    }
+
     const inputKey = $('api-key').value.trim();
+    saveGeminiKey(inputKey);
     const apiKey = inputKey || DEFAULT_API_KEY;
+    const diffKey = $('difficulty').value || 'medium';
     const btn = $('start-btn');
 
+    const chap = activeBook.chapters[currentChapterIndex];
+    if (!chap || !chap.text) {
+        alert("Chapitre introuvable.");
+        return;
+    }
+
+    if (!apiKey) {
+        alert("Veuillez renseigner votre clé API Gemini pour générer les questions sur ce chapitre.");
+        return;
+    }
+
     btn.disabled = true;
-    btn.innerText = "PRÉPARATION EN COURS...";
+    btn.innerText = "GÉNÉRATION DU QUIZ EN COURS...";
 
     try {
-        if (currentMode === 'file') {
-            const customTxt = $('custom-text').value.trim();
-            if (!customTxt || customTxt.length < 30) {
-                throw new Error("Veuillez importer un fichier EPUB/TXT valide ou saisir un texte.");
-            }
-            if (!apiKey) {
-                throw new Error("Veuillez renseigner votre clé API Gemini pour générer les questions sur votre document.");
-            }
-            activeText = customTxt;
-            generatedQuiz = await generateQuizFromText(apiKey, activeText);
-        } else {
-            const theme = $('theme').value.trim();
-            if (apiKey) {
-                const data = await fetchTextAndQuizFromGemini(apiKey, theme);
-                activeText = data.text;
-                generatedQuiz = data.quiz;
-            } else {
-                activeText = fallbackData.text;
-                generatedQuiz = fallbackData.quiz;
-            }
-        }
-
+        activeText = chap.text;
+        generatedQuiz = await generateQuizFromText(apiKey, activeText, diffKey);
         startReadingSession();
     } catch (err) {
         alert(err.message);
     } finally {
         btn.disabled = false;
-        btn.innerText = "COMMENCER LA LECTURE";
+        const isAlreadyRead = (activeBook.readChapters || []).includes(chap.id);
+        btn.innerText = isAlreadyRead ? "Relire ce chapitre" : "Commencer la lecture";
     }
 }
 
-async function fetchTextAndQuizFromGemini(apiKey, theme) {
-    const prompt = `Écris un texte riche et captivant d'environ 180 mots en français sur le thème : "${theme}".
-    Aère le texte en 2 ou 3 paragraphes.
-    Crée ensuite 3 questions à choix multiples (QCM) précises sur des détails du texte pour vérifier que le lecteur a bien lu l'intégralité du passage.
-    Réponds UNIQUEMENT en JSON strict sans balises markdown :
-    {
-        "text": "Paragraphe 1...\n\nParagraphe 2...",
-        "quiz": [
-            {"question": "Question 1 ?", "options": ["Choix A", "Choix B", "Choix C"], "answer": 0}
-        ]
-    }`;
+async function generateQuizFromText(apiKey, text, diffKey) {
+    const diff = DIFFICULTY_CONFIG[diffKey];
 
-    return await callGeminiJSON(apiKey, prompt);
-}
-
-async function generateQuizFromText(apiKey, text) {
-    const prompt = `Voici un texte que l'utilisateur vient de lire :
+    const prompt = `Voici un passage de livre que l'utilisateur vient de lire :
     "${text}"
-    Crée 3 questions à choix multiples (QCM) précises et pertinentes sur les informations contenues dans ce texte pour vérifier qu'il l'a bien lu attentivement.
+    ${diff.promptRule}
     Réponds UNIQUEMENT en JSON strict sans balises markdown :
     [
         {"question": "Question 1 ?", "options": ["Choix A", "Choix B", "Choix C"], "answer": 0}
     ]`;
 
-    return await callGeminiJSON(apiKey, prompt);
-}
-
-async function callGeminiJSON(apiKey, prompt) {
     const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -251,6 +530,7 @@ function startReadingSession() {
     $('quiz-screen').style.display = 'none';
     $('game-screen').style.display = 'flex';
 
+    $('hud-chapter-title').innerText = activeChapterLabel;
     const track = $('text-track');
     track.innerText = activeText;
 
@@ -271,13 +551,19 @@ function updateScrollProgress() {
 }
 
 // ==========================================
-// 3. QUIZ & ATTRIBUTION DES POINTS
+// 5. VALIDATION DU CHAPITRE ("LU" SI 100%) & SCORE
 // ==========================================
 
 function showQuizScreen() {
+    const diffKey = $('difficulty').value || 'medium';
+    const diff = DIFFICULTY_CONFIG[diffKey];
+
     $('game-screen').style.display = 'none';
     $('quiz-screen').style.display = 'block';
+    $('quiz-title').innerText = `Interrogatoire — ${diff.label} (×${diff.multiplier})`;
     $('submit-quiz-btn').style.display = 'block';
+    $('retry-chapter-btn').style.display = 'none';
+    $('next-chapter-btn').style.display = 'none';
     $('restart-btn').style.display = 'none';
 
     userAnswers = {};
@@ -334,9 +620,12 @@ async function evaluateQuiz() {
         if (chosen === q.answer) correctCount++;
     });
 
-    // Calcul des points : 10 pts par bonne réponse + 20 pts bonus si sans-faute
+    const diffKey = $('difficulty').value || 'medium';
+    const diff = DIFFICULTY_CONFIG[diffKey];
     const isPerfect = correctCount === generatedQuiz.length;
-    const pointsGagnes = (correctCount * 10) + (isPerfect ? 20 : 0);
+
+    const basePoints = (correctCount * 10) + (isPerfect ? 20 : 0);
+    const pointsGagnes = Math.round(basePoints * diff.multiplier);
 
     userStats.scoreTotal += pointsGagnes;
     userStats.quizzesCompleted += 1;
@@ -345,26 +634,62 @@ async function evaluateQuiz() {
     saveLocalStats();
     await pushToCloud();
 
+    // Si 100% de réussite, marquer ce chapitre comme "LU" dans IndexedDB
+    let validationStatusMsg = "";
+    const chap = activeBook.chapters[currentChapterIndex];
+
+    if (isPerfect && chap) {
+        if (!activeBook.readChapters) activeBook.readChapters = [];
+        if (!activeBook.readChapters.includes(chap.id)) {
+            activeBook.readChapters.push(chap.id);
+        }
+        activeBook.updatedAt = Date.now();
+        await dbSaveBook(activeBook);
+        validationStatusMsg = `<span style="color:#fff;">✓ CHAPITRE VALIDÉ COMME LU</span>`;
+    } else {
+        validationStatusMsg = `<span style="color:#aaa;">✗ NON VALIDÉ (100% requis pour marquer comme lu)</span>`;
+    }
+
     $('submit-quiz-btn').style.display = 'none';
     $('restart-btn').style.display = 'block';
+
+    if (!isPerfect) {
+        $('retry-chapter-btn').style.display = 'block';
+    }
+
+    if (currentChapterIndex + 1 < activeBook.chapters.length) {
+        const nextChap = activeBook.chapters[currentChapterIndex + 1];
+        $('next-chapter-btn').innerText = `Lire ${nextChap.label} →`;
+        $('next-chapter-btn').style.display = 'block';
+    }
 
     const finalMsg = document.createElement('div');
     finalMsg.className = 'result-box';
     finalMsg.innerHTML = `
-        SCORE : <strong>${correctCount} / ${generatedQuiz.length}</strong><br>
+        ${validationStatusMsg}<br>
+        SCORE : <strong>${correctCount} / ${generatedQuiz.length}</strong> (${diff.label} ×${diff.multiplier})<br>
         POINTS GAGNÉS : <strong>+${pointsGagnes} PTS</strong> (Total : ${userStats.scoreTotal} pts)
     `;
     $('quiz-container').appendChild(finalMsg);
 }
 
-function resetToMenu() {
+async function launchNextChapter() {
+    if (!activeBook || currentChapterIndex + 1 >= activeBook.chapters.length) return;
+    await selectChapter(currentChapterIndex + 1);
+    await initGame();
+}
+
+async function resetToMenu() {
     $('game-screen').style.display = 'none';
     $('quiz-screen').style.display = 'none';
     $('setup-screen').style.display = 'block';
+    if (activeBook) {
+        await refreshLibraryUI(activeBook.id);
+    }
 }
 
 // ==========================================
-// 4. FIREBASE SYNC, CLASSEMENT & SÉCURITÉ
+// 6. FIREBASE SYNC & CLASSEMENT PAR CLÉ
 // ==========================================
 
 function saveLocalStats() {
@@ -393,18 +718,25 @@ function updateSyncKeyUI() {
     if (!el) return;
     const isLocked = Boolean(currentKeyPassword);
     el.textContent = syncKey ? `${syncKey} ${isLocked ? "🔒" : ""}` : "CLÉ";
+    if ($('current-lb-key')) {
+        $('current-lb-key').textContent = syncKey || "Non définie";
+    }
 }
 
 function genererNouvelleCle() {
     return "READ-" + Math.random().toString(36).substring(2, 8).toUpperCase();
 }
 
+function sanitizeFirebaseKey(rawKey) {
+    return rawKey.replace(/[.#$\[\]/]/g, '_').trim();
+}
+
 async function changerOuCopierCle() {
     const action = prompt(
-        `Clé actuelle : ${syncKey || "Aucune"}\n\n` +
-        `1. Changer ou créer une clé\n` +
+        `Clé actuelle (votre nom dans le classement) : ${syncKey || "Aucune"}\n\n` +
+        `1. Changer ou créer une clé (ex: votre prénom ou pseudo)\n` +
         `2. Définir / modifier le mot de passe de cette clé\n` +
-        `Entrez 1, 2 ou directement une nouvelle clé :`
+        `Entrez 1, 2 ou directement le nom de votre nouvelle clé :`
     );
 
     if (action === null) return;
@@ -429,7 +761,11 @@ async function changerOuCopierCle() {
         return;
     }
 
-    let nouvelleCle = (saisie === "1") ? (prompt("Entrez la clé :") || "").trim() : saisie;
+    let rawNouvelleCle = (saisie === "1") ? (prompt("Entrez le nom de votre clé :") || "") : saisie;
+    let nouvelleCle = sanitizeFirebaseKey(rawNouvelleCle);
+
+    userStats = { scoreTotal: 0, quizzesCompleted: 0, perfectScores: 0 };
+    saveLocalStats();
 
     if (!nouvelleCle) {
         syncKey = genererNouvelleCle();
@@ -479,7 +815,7 @@ async function pullFromCloud() {
             let hashLocal = await hashPassword(currentKeyPassword);
 
             while (hashLocal !== payload.passwordHash && tentatives < 3) {
-                const saisie = prompt(`La clé ${syncKey} est protégée par un mot de passe :`);
+                const saisie = prompt(`La clé "${syncKey}" est protégée par un mot de passe :`);
                 if (saisie === null) {
                     updateSyncStatus("ACCÈS REFUSÉ");
                     return;
@@ -498,16 +834,13 @@ async function pullFromCloud() {
             updateSyncKeyUI();
         }
 
-        // Fusion des stats (on conserve le meilleur score)
         userStats = {
-            pseudo: payload.pseudo || userStats.pseudo,
             scoreTotal: Math.max(userStats.scoreTotal || 0, payload.scoreTotal || 0),
             quizzesCompleted: Math.max(userStats.quizzesCompleted || 0, payload.quizzesCompleted || 0),
             perfectScores: Math.max(userStats.perfectScores || 0, payload.perfectScores || 0)
         };
 
         saveLocalStats();
-        $('pseudo-input').value = userStats.pseudo;
         updateSyncStatus("À JOUR", true);
     } catch (e) {
         console.error("Erreur lecture Firebase:", e);
@@ -561,7 +894,7 @@ async function pushToCloud() {
 
 async function ouvrirClassement() {
     $('leaderboard-overlay').classList.remove('hidden');
-    $('pseudo-input').value = userStats.pseudo;
+    updateSyncKeyUI();
     const listEl = $('leaderboard-list');
     listEl.innerHTML = '<div class="lb-row">Chargement du classement...</div>';
 
@@ -578,19 +911,23 @@ async function ouvrirClassement() {
         const players = Object.entries(data)
             .map(([key, val]) => ({
                 key,
-                pseudo: val.pseudo || "Anonyme",
                 scoreTotal: val.scoreTotal || 0,
-                quizzesCompleted: val.quizzesCompleted || 0
+                quizzesCompleted: val.quizzesCompleted || 0,
+                perfectScores: val.perfectScores || 0
             }))
             .sort((a, b) => b.scoreTotal - a.scoreTotal)
-            .slice(0, 25); // Top 25
+            .slice(0, 30);
 
         listEl.innerHTML = players.map((p, index) => {
             const isMe = p.key === syncKey;
+            const medal = index === 0 ? "🥇 " : index === 1 ? "🥈 " : index === 2 ? "🥉 " : `#${index + 1} `;
             return `
                 <div class="lb-row ${isMe ? 'me' : ''}">
-                    <span>#${index + 1} ${escapeHtml(p.pseudo)} (${p.quizzesCompleted} quiz)</span>
-                    <span>${p.scoreTotal} PTS</span>
+                    <div class="lb-rank-name">
+                        <span class="lb-name">${medal}${escapeHtml(p.key)} ${isMe ? "(Vous)" : ""}</span>
+                        <span class="lb-meta">${p.perfectScores} chapitres validés · ${p.quizzesCompleted} tentatives</span>
+                    </div>
+                    <span class="lb-score">${p.scoreTotal} PTS</span>
                 </div>
             `;
         }).join('');
@@ -600,52 +937,45 @@ async function ouvrirClassement() {
 }
 
 function escapeHtml(str) {
-    return str.replace(/[&<>"']/g, m => ({
+    return String(str).replace(/[&<>"']/g, m => ({
         '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
     }[m]));
 }
 
-async function sauvegarderPseudo() {
-    const val = $('pseudo-input').value.trim();
-    if (!val) return;
-    userStats.pseudo = val;
-    saveLocalStats();
-    await pushToCloud();
-    ouvrirClassement();
-}
-
 // ==========================================
-// 5. ÉVÉNEMENTS, ANTI-ZOOM & INITIALISATION PWA
+// 7. ÉVÉNEMENTS & INITIALISATION PWA
 // ==========================================
 
-$('tab-ai').addEventListener('click', () => switchTab('ai'));
-$('tab-file').addEventListener('click', () => switchTab('file'));
+$('api-key').addEventListener('input', e => saveGeminiKey(e.target.value));
+$('difficulty').addEventListener('change', e => localStorage.setItem("focus_read_difficulty", e.target.value));
+
+// Si on change la taille des segments, re-découper le livre actif proprement
+$('text-length').addEventListener('change', async e => {
+    localStorage.setItem("focus_read_length", e.target.value);
+    if (activeBook && activeBook.rawChapters) {
+        activeBook.chapters = buildSegmentsFromRawChapters(activeBook.rawChapters);
+        activeBook.lastIndex = 0;
+        await dbSaveBook(activeBook);
+        await refreshLibraryUI(activeBook.id);
+    }
+});
+
 $('file-drop-zone').addEventListener('click', () => $('file-input').click());
 $('file-input').addEventListener('change', handleFileUpload);
+$('chapter-select').addEventListener('change', e => selectChapter(e.target.value));
+
 $('start-btn').addEventListener('click', initGame);
 $('viewport').addEventListener('scroll', updateScrollProgress);
 $('finish-reading-btn').addEventListener('click', showQuizScreen);
 $('submit-quiz-btn').addEventListener('click', evaluateQuiz);
+$('retry-chapter-btn').addEventListener('click', startReadingSession);
+$('next-chapter-btn').addEventListener('click', launchNextChapter);
 $('restart-btn').addEventListener('click', resetToMenu);
 
 // Firebase & Classement events
 $('btnSyncKey').addEventListener('click', changerOuCopierCle);
 $('btnLeaderboard').addEventListener('click', ouvrirClassement);
 $('btnCloseLeaderboard').addEventListener('click', () => $('leaderboard-overlay').classList.add('hidden'));
-$('btnSavePseudo').addEventListener('click', sauvegarderPseudo);
-
-// Protection anti-zoom (identique à votre projet)
-document.addEventListener('wheel', e => { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
-document.addEventListener('keydown', e => {
-    if ((e.ctrlKey || e.metaKey) && ['+', '-', '=', '0'].includes(e.key)) e.preventDefault();
-});
-document.addEventListener('touchmove', e => { if (e.touches.length > 1) e.preventDefault(); }, { passive: false });
-let lastTouchEnd = 0;
-document.addEventListener('touchend', e => {
-    const now = Date.now();
-    if (now - lastTouchEnd <= 300) e.preventDefault();
-    lastTouchEnd = now;
-}, false);
 
 // Enregistrement du Service Worker PWA
 if ('serviceWorker' in navigator) {
@@ -655,5 +985,9 @@ if ('serviceWorker' in navigator) {
 }
 
 // Démarrage
-updateSyncKeyUI();
-pullFromCloud();
+(async () => {
+    loadLocalPreferences();
+    updateSyncKeyUI();
+    await refreshLibraryUI();
+    pullFromCloud();
+})();

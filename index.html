@@ -2,8 +2,8 @@
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>FOCUS // READ & QUIZ</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FOCUS // EPUB & QUIZ</title>
     
     <!-- PWA -->
     <link rel="manifest" href="manifest.json">
@@ -18,7 +18,7 @@
 </head>
 <body>
 
-    <!-- 1. CONFIGURATION & CLASSEMENT -->
+    <!-- 1. BIBLIOTHÈQUE & CONFIGURATION -->
     <div class="panel" id="setup-screen">
         <div class="top-bar">
             <button class="mini-btn" id="btnSyncKey">CLÉ</button>
@@ -26,73 +26,100 @@
             <button class="mini-btn" id="btnLeaderboard">CLASSEMENT</button>
         </div>
 
-        <h1>Focus // Read</h1>
+        <h1>Focus // Library</h1>
 
         <div class="field">
-            <label for="api-key">Clé API Gemini (Optionnelle si définie dans config.js)</label>
-            <input type="password" id="api-key" placeholder="AIzaSy... (laisser vide pour mode démo)">
+            <label for="api-key">Clé API Gemini (Requise pour générer les quiz)</label>
+            <input type="password" id="api-key" placeholder="AIzaSy... (sauvegardée en local)">
         </div>
 
-        <div class="tabs">
-            <button class="tab-btn active" id="tab-ai">Générer par IA</button>
-            <button class="tab-btn" id="tab-file">Importer EPUB / TXT</button>
-        </div>
-
-        <!-- MODE IA -->
-        <div id="mode-ai">
+        <!-- DIFFICULTÉ & DÉCOUPAGE -->
+        <div class="row-fields">
             <div class="field">
-                <label for="theme">Sujet du texte à lire</label>
-                <input type="text" id="theme" value="Le journal d'un gardien de phare isolé">
+                <label for="difficulty">Difficulté du Quiz</label>
+                <select id="difficulty">
+                    <option value="easy">Facile (3 QCM · ×1 pts)</option>
+                    <option value="medium" selected>Moyen (4 QCM · ×1.5 pts)</option>
+                    <option value="hard">Difficile (5 QCM · ×2 pts)</option>
+                </select>
             </div>
-        </div>
 
-        <!-- MODE IMPORT EPUB / TXT -->
-        <div id="mode-file" style="display:none;">
             <div class="field">
-                <label>Fichier (.epub ou .txt)</label>
-                <div class="file-drop" id="file-drop-zone">
-                    <span id="file-label">Cliquez pour choisir un fichier EPUB ou TXT</span>
-                    <input type="file" id="file-input" accept=".epub,.txt" style="display:none">
-                </div>
-            </div>
-            <div class="field" id="preview-box" style="display:none;">
-                <label>Extrait converti (modifiable - ~350 mots max conseillés)</label>
-                <textarea id="custom-text" rows="5"></textarea>
+                <label for="text-length">Taille des segments</label>
+                <select id="text-length">
+                    <option value="short">Court (~250 mots max)</option>
+                    <option value="medium" selected>Moyen (~550 mots max)</option>
+                    <option value="long">Long (~950 mots max)</option>
+                </select>
             </div>
         </div>
 
-        <button class="action-btn" id="start-btn">Commencer la lecture</button>
+        <!-- IMPORTATION DE FICHIER -->
+        <div class="field">
+            <label>Ajouter un livre à ma bibliothèque (.epub ou .txt)</label>
+            <div class="file-drop" id="file-drop-zone">
+                <span id="file-label">+ Importer un fichier EPUB ou TXT</span>
+                <input type="file" id="file-input" accept=".epub,.txt" style="display:none">
+            </div>
+        </div>
+
+        <!-- MA BIBLIOTHÈQUE LOCALE (INDEXEDDB) -->
+        <div class="field" id="library-box" style="display:none;">
+            <label>Ma Bibliothèque sauvegardée</label>
+            <div id="library-list" class="library-list"></div>
+        </div>
+
+        <!-- PROGRESSION & SÉLECTEUR DE CHAPITRE DU LIVRE ACTIF -->
+        <div class="field" id="chapter-selector-box" style="display:none;">
+            <div class="book-progress-header">
+                <label for="chapter-select" id="book-title-label">Livre actif</label>
+                <span id="book-progress-text" class="progress-badge">0% LU</span>
+            </div>
+            <div class="book-progress-bar-bg">
+                <div id="book-progress-bar-fill" class="book-progress-bar-fill"></div>
+            </div>
+            <select id="chapter-select"></select>
+        </div>
+
+        <div class="field" id="preview-box" style="display:none;">
+            <label>Aperçu du passage sélectionné</label>
+            <textarea id="custom-text" rows="4" readonly></textarea>
+        </div>
+
+        <button class="action-btn" id="start-btn" disabled>Sélectionnez ou importez un livre</button>
     </div>
 
     <!-- 2. ZONE DE LECTURE LIBRE -->
     <div id="game-screen">
         <div class="hud">
-            <span>LECTURE LIBRE — NE QUITTEZ PAS L'ÉCRAN</span>
+            <span id="hud-chapter-title">LECTURE EN COURS</span>
             <span id="scroll-percent">0%</span>
         </div>
 
         <div class="scroll-viewport" id="viewport">
             <div id="text-track"></div>
             <div class="end-reading-box">
-                <p>Vous avez atteint la fin du passage.</p>
+                <p>Fin du passage atteinte.</p>
                 <button class="action-btn" id="finish-reading-btn">J'ai fini de lire → Passer au quiz</button>
             </div>
         </div>
 
         <div class="footer-note">
-            SCROLLEZ À VOTRE RYTHME · LE TEXTE DISPARAÎTRA AU QUIZ
+            SCROLLEZ ET ZOOMEZ LIBREMENT · LE TEXTE DISPARAÎTRA AU QUIZ
         </div>
     </div>
 
     <!-- 3. INTERROGATOIRE IA DE FIN -->
     <div class="panel" id="quiz-screen">
-        <h2>Interrogatoire de fin</h2>
+        <h2 id="quiz-title">Interrogatoire de fin</h2>
         <p class="subtitle">
-            Le texte a disparu. Répondez aux questions suivantes sur ce que vous venez de lire :
+            Réussissez 100% des questions pour valider ce chapitre comme <strong>LU</strong> :
         </p>
         <div id="quiz-container"></div>
         <button class="action-btn" id="submit-quiz-btn">Valider mes réponses</button>
-        <button class="action-btn" id="restart-btn" style="display:none; margin-top: 1rem;">Nouvelle lecture</button>
+        <button class="action-btn" id="retry-chapter-btn" style="display:none; margin-top: 1rem;">Relire ce chapitre pour le valider</button>
+        <button class="action-btn" id="next-chapter-btn" style="display:none; margin-top: 1rem;">Lire le chapitre suivant →</button>
+        <button class="action-btn secondary-btn" id="restart-btn" style="display:none; margin-top: 0.6rem;">Retour à la bibliothèque</button>
     </div>
 
     <!-- 4. MODALE CLASSEMENT FIREBASE -->
@@ -102,13 +129,9 @@
                 <h2>Classement Global</h2>
                 <button class="mini-btn" id="btnCloseLeaderboard">FERMER [X]</button>
             </div>
-            <div class="field">
-                <label for="pseudo-input">Votre Pseudo (Classement)</label>
-                <div class="pseudo-row">
-                    <input type="text" id="pseudo-input" maxlength="16" placeholder="Ex: Lecteur_01">
-                    <button class="mini-btn" id="btnSavePseudo">OK</button>
-                </div>
-            </div>
+            <p class="subtitle" style="margin-bottom: 0.8rem;">
+                Votre identifiant affiché : <strong id="current-lb-key">---</strong>
+            </p>
             <div id="leaderboard-list" class="leaderboard-list">
                 Chargement...
             </div>

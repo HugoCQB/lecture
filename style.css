@@ -20,7 +20,6 @@ body {
     align-items: center;
     justify-content: center;
     min-height: 100vh;
-    overflow: hidden;
 }
 
 /* BARRE SUPÉRIEURE SYNC & CLASSEMENT */
@@ -38,11 +37,12 @@ body {
     background: var(--bg);
     color: var(--fg);
     border: 1px solid var(--muted);
-    padding: 0.4rem 0.6rem;
+    padding: 0.45rem 0.65rem;
     font-family: 'Courier New', monospace;
     font-size: 0.72rem;
     text-transform: uppercase;
     cursor: pointer;
+    white-space: nowrap;
 }
 
 .mini-btn:hover {
@@ -53,7 +53,7 @@ body {
 .sync-badge {
     font-family: 'Courier New', monospace;
     font-size: 0.7rem;
-    padding: 0.35rem 0.5rem;
+    padding: 0.4rem 0.5rem;
     border: 1px solid var(--border);
     color: #aaa;
     text-align: center;
@@ -63,12 +63,13 @@ body {
 /* PANNEAUX PRINCIPAUX */
 .panel {
     width: 92%;
-    max-width: 600px;
+    max-width: 620px;
     border: 1px solid var(--fg);
     padding: 2rem;
     background: var(--bg);
     max-height: 92vh;
     overflow-y: auto;
+    margin: 1rem 0;
 }
 
 h1, h2 {
@@ -87,28 +88,17 @@ h1, h2 {
     margin-bottom: 1.5rem;
 }
 
-.tabs {
-    display: flex;
-    margin-bottom: 1.5rem;
-    border: 1px solid var(--muted);
+.row-fields {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.8rem;
 }
 
-.tab-btn {
-    flex: 1;
-    padding: 0.7rem;
-    background: var(--bg);
-    color: var(--muted);
-    border: none;
-    font-family: 'Courier New', monospace;
-    font-size: 0.82rem;
-    cursor: pointer;
-    text-transform: uppercase;
-}
-
-.tab-btn.active {
-    background: var(--fg);
-    color: var(--bg);
-    font-weight: bold;
+@media (max-width: 480px) {
+    .row-fields {
+        grid-template-columns: 1fr;
+        gap: 0;
+    }
 }
 
 .field {
@@ -125,33 +115,136 @@ label {
     color: #a3a3a3;
 }
 
-input, textarea {
+input, select, textarea {
     background: var(--bg);
     border: 1px solid var(--muted);
     color: var(--fg);
     padding: 0.75rem;
     font-family: 'Courier New', monospace;
-    font-size: 0.9rem;
+    font-size: 0.86rem;
     outline: none;
     width: 100%;
 }
 
-input:focus, textarea:focus {
+input:focus, select:focus, textarea:focus {
     border-color: var(--fg);
+}
+
+textarea[readonly] {
+    color: #bbbbbb;
+    border-color: var(--border);
 }
 
 .file-drop {
     border: 1px dashed var(--muted);
-    padding: 1.5rem;
+    padding: 1.1rem;
     text-align: center;
     font-family: 'Courier New', monospace;
-    font-size: 0.85rem;
+    font-size: 0.82rem;
     cursor: pointer;
     transition: border-color 0.2s;
 }
 
 .file-drop:hover {
     border-color: var(--fg);
+}
+
+/* BIBLIOTHÈQUE LOCALE */
+.library-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    max-height: 170px;
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    padding: 0.4rem;
+}
+
+.lib-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    cursor: pointer;
+    font-family: 'Courier New', monospace;
+    font-size: 0.8rem;
+    gap: 0.5rem;
+}
+
+.lib-item:hover {
+    border-color: var(--muted);
+}
+
+.lib-item.active {
+    border-color: var(--fg);
+    background: #161616;
+}
+
+.lib-info {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    overflow: hidden;
+}
+
+.lib-title {
+    font-weight: bold;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.lib-sub {
+    font-size: 0.7rem;
+    color: #999;
+}
+
+.lib-del-btn {
+    background: transparent;
+    color: #888;
+    border: 1px solid var(--border);
+    padding: 0.25rem 0.5rem;
+    font-family: 'Courier New', monospace;
+    font-size: 0.7rem;
+    cursor: pointer;
+}
+
+.lib-del-btn:hover {
+    color: var(--fg);
+    border-color: var(--fg);
+}
+
+/* PROGRESSION DU LIVRE */
+.book-progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.progress-badge {
+    font-family: 'Courier New', monospace;
+    font-size: 0.72rem;
+    color: var(--fg);
+    font-weight: bold;
+    white-space: nowrap;
+}
+
+.book-progress-bar-bg {
+    width: 100%;
+    height: 6px;
+    border: 1px solid var(--muted);
+    background: var(--bg);
+    margin-bottom: 0.3rem;
+}
+
+.book-progress-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: var(--fg);
+    transition: width 0.25s ease;
 }
 
 .action-btn {
@@ -162,22 +255,32 @@ input:focus, textarea:focus {
     padding: 1rem;
     font-family: 'Courier New', monospace;
     font-weight: bold;
-    font-size: 0.92rem;
+    font-size: 0.9rem;
     text-transform: uppercase;
-    letter-spacing: 2px;
+    letter-spacing: 1.5px;
     cursor: pointer;
     transition: all 0.15s;
     margin-top: 0.5rem;
 }
 
-.action-btn:hover {
+.action-btn:hover:not(:disabled) {
     background: var(--bg);
     color: var(--fg);
 }
 
 .action-btn:disabled {
-    opacity: 0.4;
+    opacity: 0.35;
     cursor: not-allowed;
+}
+
+.secondary-btn {
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--muted);
+}
+
+.secondary-btn:hover {
+    border-color: var(--fg);
 }
 
 /* ÉCRAN DE LECTURE LIBRE */
@@ -195,11 +298,18 @@ input:focus, textarea:focus {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    gap: 1rem;
     border-bottom: 1px solid var(--border);
     padding-bottom: 0.8rem;
     font-family: 'Courier New', monospace;
     font-size: 0.8rem;
     color: #a3a3a3;
+}
+
+#hud-chapter-title {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .scroll-viewport {
@@ -212,7 +322,6 @@ input:focus, textarea:focus {
     user-select: none;
 }
 
-/* Personnalisation discrète de la scrollbar */
 .scroll-viewport::-webkit-scrollbar {
     width: 4px;
 }
@@ -224,8 +333,8 @@ input:focus, textarea:focus {
 }
 
 #text-track {
-    font-size: 1.35rem;
-    line-height: 2.1;
+    font-size: 1.32rem;
+    line-height: 2.05;
     text-align: justify;
     white-space: pre-line;
 }
@@ -310,7 +419,7 @@ input:focus, textarea:focus {
     padding: 1rem;
     border: 1px solid var(--fg);
     text-align: center;
-    font-size: 0.95rem;
+    font-size: 0.92rem;
     line-height: 1.6;
 }
 
@@ -344,11 +453,6 @@ input:focus, textarea:focus {
     margin: 0;
 }
 
-.pseudo-row {
-    display: flex;
-    gap: 0.5rem;
-}
-
 .leaderboard-list {
     margin-top: 1rem;
     border: 1px solid var(--border);
@@ -361,12 +465,34 @@ input:focus, textarea:focus {
 .lb-row {
     display: flex;
     justify-content: space-between;
-    padding: 0.7rem 0.9rem;
+    align-items: center;
+    padding: 0.75rem 0.9rem;
     border-bottom: 1px solid var(--border);
+    gap: 0.8rem;
+}
+
+.lb-rank-name {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+}
+
+.lb-name {
+    font-weight: bold;
+    font-size: 0.92rem;
+}
+
+.lb-meta {
+    font-size: 0.72rem;
+    opacity: 0.75;
+}
+
+.lb-score {
+    font-weight: bold;
+    white-space: nowrap;
 }
 
 .lb-row.me {
     background: var(--fg);
     color: var(--bg);
-    font-weight: bold;
 }
