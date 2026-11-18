@@ -665,7 +665,7 @@ function prepareTextForQuiz(text, maxChars = 28000) {
 }
 
 async function callGeminiQuiz(apiKey, text, qCount) {
-    const models = ["gemini-1.5-flash", "gemini-1.5-pro"];
+    const models = ["gemini-3.5-flash-lite", "gemini-3.8-flash"];
     const excerpt = prepareTextForQuiz(text);
     const prompt = `Tu es un professeur exigeant. À partir du texte suivant, génère exactement ${qCount} questions QCM de compréhension à 3 choix (index 0, 1 ou 2) couvrant l'ensemble du passage.\nFormat JSON attendu : [{"question":"...","options":["Choix 1","Choix 2","Choix 3"],"answer":0,"explanation":"Explication courte"}]\n\nTexte :\n"""\n${excerpt}\n"""`;
 
