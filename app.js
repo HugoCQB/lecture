@@ -1,4 +1,5 @@
 const $ = id => document.getElementById(id);
+const on = (id, ev, fn) => { const el = $(id); if (el) el[ev] = fn; };
 
 const RAW_DB_URL = (typeof ENV !== 'undefined' && ENV.FIREBASE_DB_URL)
     ? ENV.FIREBASE_DB_URL
@@ -19,7 +20,7 @@ let syncKey = localStorage.getItem("focus_read_sync_key") || null;
 let currentKeyPassword = localStorage.getItem("focus_read_sync_pwd") || "";
 let userStats = { scoreTotal: 0, quizzesCompleted: 0, perfectScores: 0, totalChaptersRead: 0, streakDays: 0, lastReadDate: null };
 
-// --- UTILITAIRES & FIREBASE ---
+// --- UTILITAIRES RÉSEAU & STOCKAGE ---
 
 const esc = s => String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
 const cleanKey = k => String(k).trim().replace(/[.#$\[\]/]/g, '_');
@@ -29,6 +30,18 @@ const dateKey = (offset = 0) => {
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 };
 
+const isChapterValidated = (book, chap) => Boolean(book && chap && (book.readChapters || []).includes(chap.id));
+
+async function fetchWithTimeout(url, opts = {}, timeoutMs = 15000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...opts, signal: ctrl.signal });
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
 async function fb(path, method = "GET", body = null) {
     const cleanPath = path.replace(/^\/+/, '');
     const opts = { method, cache: "no-store" };
@@ -36,7 +49,7 @@ async function fb(path, method = "GET", body = null) {
         opts.headers = { "Content-Type": "application/json" };
         opts.body = JSON.stringify(body);
     }
-    const res = await fetch(`${DB_URL}/${cleanPath}.json`, opts);
+    const res = await fetchWithTimeout(`${DB_URL}/${cleanPath}.json`, opts, 12000);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return method === "DELETE" ? true : res.json();
 }
@@ -48,16 +61,19 @@ async function sha256(str) {
 }
 
 function showView(viewId) {
-    ['setup-screen', 'game-screen', 'quiz-screen'].forEach(id => $(id).hidden = id !== viewId);
+    ['setup-screen', 'game-screen', 'quiz-screen'].forEach(id => {
+        const el = $(id);
+        if (el) el.hidden = id !== viewId;
+    });
     window.scrollTo(0, 0);
 }
 
 function setSyncStatus(msg, online = false) {
-    $('syncStatus').textContent = `Sync : ${msg}`;
-    $('syncDot').classList.toggle('online', online);
+    if ($('syncStatus')) $('syncStatus').textContent = msg;
+    if ($('syncDot')) $('syncDot').classList.toggle('online', online);
 }
 
-// --- STATISTIQUES & STREAK ---
+// --- STATISTIQUES ---
 
 function getStreak(stats = userStats) {
     if (!stats?.lastReadDate || !stats?.streakDays) return 0;
@@ -80,7 +96,7 @@ function questionCount(words) {
     return 12;
 }
 
-// --- COMPTE & SYNCHRONISATION ---
+// --- BACK-END : SYNCHRONISATION FIREBASE ---
 
 function updateAccountUI() {
     $('syncKeyLabel').textContent = syncKey ? `${syncKey}${currentKeyPassword ? " · 🔒" : ""}` : "Définir un compte";
@@ -88,12 +104,13 @@ function updateAccountUI() {
 }
 
 async function canWriteAccount() {
+    if (!syncKey) return false;
     const distantHash = await fb(`focus_read_users/${encodeURIComponent(syncKey)}/passwordHash`);
     return !distantHash || distantHash === await sha256(currentKeyPassword);
 }
 
 async function saveBookCloud(book) {
-    if (!navigator.onLine) return alert("Connexion requise."), false;
+    if (!navigator.onLine) return false;
     if (!syncKey) {
         syncKey = "READ-" + Math.random().toString(36).substring(2, 8).toUpperCase();
         localStorage.setItem("focus_read_sync_key", syncKey);
@@ -104,7 +121,10 @@ async function saveBookCloud(book) {
     setSyncStatus("Sauvegarde...");
 
     try {
-        if (!await canWriteAccount()) return setSyncStatus("Accès refusé"), alert("Mot de passe incorrect."), false;
+        if (!await canWriteAccount()) {
+            setSyncStatus("Accès refusé");
+            return false;
+        }
 
         const base = `focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`;
         const meta = {
@@ -141,11 +161,10 @@ async function saveBookCloud(book) {
         const idx = accountBooks.findIndex(b => b.id === book.id);
         idx >= 0 ? (accountBooks[idx] = full) : accountBooks.unshift(full);
 
-        setSyncStatus("À jour", true);
+        setSyncStatus("Synchronisé", true);
         return true;
     } catch (e) {
         setSyncStatus(`Erreur sync (${e.message})`);
-        alert("Erreur sauvegarde : " + e.message);
         return false;
     }
 }
@@ -154,7 +173,7 @@ async function pullAccount() {
     if (!navigator.onLine) return setSyncStatus("Hors ligne");
 
     if (!syncKey) {
-        const input = prompt("Entrez votre nom de compte existant (ou laissez vide pour en créer un) :");
+        const input = prompt("Entrez votre identifiant de compte (ou vide pour en créer un) :");
         const cleaned = input ? cleanKey(input) : "";
         syncKey = cleaned || ("READ-" + Math.random().toString(36).substring(2, 8).toUpperCase());
         localStorage.setItem("focus_read_sync_key", syncKey);
@@ -166,7 +185,7 @@ async function pullAccount() {
     try {
         const data = await fb(`focus_read_users/${encodeURIComponent(syncKey)}`);
         if (!data) {
-            setSyncStatus("Nouveau compte créé", true);
+            setSyncStatus("Nouveau profil", true);
             return pushStats();
         }
 
@@ -183,7 +202,7 @@ async function pullAccount() {
                 localStorage.removeItem("focus_read_sync_key");
                 localStorage.removeItem("focus_read_sync_pwd");
                 updateAccountUI();
-                return setSyncStatus("Accès refusé");
+                return setSyncStatus("Mot de passe incorrect");
             }
             localStorage.setItem("focus_read_sync_pwd", currentKeyPassword);
             updateAccountUI();
@@ -210,10 +229,9 @@ async function pullAccount() {
             .filter(b => b.chapters.length > 0);
 
         renderLibrary();
-        setSyncStatus(`À jour (${accountBooks.length} livre${accountBooks.length > 1 ? 's' : ''})`, true);
+        setSyncStatus(`À jour · ${accountBooks.length} livre${accountBooks.length > 1 ? 's' : ''}`, true);
     } catch (e) {
-        console.error("Erreur pullAccount:", e);
-        setSyncStatus(`Erreur (${e.message})`);
+        setSyncStatus(`Erreur réseau (${e.message})`);
     }
 }
 
@@ -235,14 +253,14 @@ async function pushStats() {
 
 async function switchAccount() {
     const choice = prompt(
-        `Compte actuel : ${syncKey || "Aucun"}\n1. Changer / créer un compte\n2. Modifier le mot de passe\nEntrez 1, 2 ou directement le nom du compte :`
+        `Profil : ${syncKey || "Aucun"}\n1. Changer / créer un compte\n2. Définir un mot de passe\nEntrez 1, 2 ou directement le nom du compte :`
     );
     if (choice === null) return;
     const val = choice.trim();
 
     if (val === "2") {
         if (!syncKey) return alert("Définissez d'abord un compte.");
-        const pwd = prompt("Nouveau mot de passe (vide pour supprimer) :");
+        const pwd = prompt("Nouveau mot de passe (laisser vide pour supprimer) :");
         if (pwd === null) return;
         currentKeyPassword = pwd.trim();
         currentKeyPassword ? localStorage.setItem("focus_read_sync_pwd", currentKeyPassword) : localStorage.removeItem("focus_read_sync_pwd");
@@ -250,7 +268,7 @@ async function switchAccount() {
         return pushStats();
     }
 
-    const raw = val === "1" ? (prompt("Nom du compte :") || "") : val;
+    const raw = val === "1" ? (prompt("Nom exact du compte :") || "") : val;
     syncKey = cleanKey(raw) || ("READ-" + Math.random().toString(36).substring(2, 8).toUpperCase());
     currentKeyPassword = "";
     localStorage.removeItem("focus_read_sync_pwd");
@@ -271,7 +289,7 @@ async function handleFileUpload(e) {
     const file = e.target.files[0];
     if (!file) return;
     const label = $('file-label');
-    label.textContent = "Analyse...";
+    label.textContent = "Analyse du fichier...";
 
     try {
         const bookId = cleanKey(`book_${file.name}_${file.size}`);
@@ -308,7 +326,7 @@ async function handleFileUpload(e) {
     } catch (err) {
         alert("Erreur import : " + err.message);
     } finally {
-        label.textContent = "+ Importer EPUB / TXT";
+        label.textContent = "+ Importer un livre (EPUB / TXT)";
         $('file-input').value = '';
     }
 }
@@ -320,7 +338,7 @@ async function parseEpub(file) {
     if (!containerXml) throw new Error("EPUB invalide.");
 
     const opfPath = parser.parseFromString(containerXml, "application/xml").querySelector("rootfile")?.getAttribute("full-path");
-    if (!opfPath) throw new Error("Fichier OPF introuvable dans l'EPUB.");
+    if (!opfPath) throw new Error("Fichier OPF introuvable.");
 
     const opfDir = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
     const opfDoc = parser.parseFromString(await zip.file(opfPath).async("text"), "application/xml");
@@ -381,7 +399,7 @@ function renderLibrary(selectedId = null) {
         $('library-box').hidden = true;
         $('chapter-selector-box').hidden = true;
         $('start-btn').disabled = true;
-        $('start-btn').textContent = "Importez ou ajoutez un livre";
+        $('start-btn').textContent = "Sélectionnez un livre";
         activeBook = null;
         return;
     }
@@ -396,19 +414,19 @@ function renderLibrary(selectedId = null) {
         const isOwner = !book.sharedBy || book.sharedBy === syncKey || book.sharedBy === "Anonyme";
 
         const row = document.createElement('div');
-        row.className = `list-row ${book.id === current.id ? 'active' : ''}`;
+        row.className = `row ${book.id === current.id ? 'active' : ''}`;
         row.innerHTML = `
-            <div class="row-main">
+            <div class="row-info">
                 <span class="row-title">${esc(book.title)}</span>
-                <span class="row-meta">${isPub ? 'Public' : 'Privé'} · ${readCount}/${book.chapters.length} chapitres</span>
+                <span class="row-sub">${readCount}/${book.chapters.length} ch. · ${isPub ? 'Public' : 'Privé'}</span>
             </div>
-            <div class="row-actions">
-                ${(!isPub || isOwner) ? `<button type="button" class="ghost-btn btn-vis">${isPub ? 'Privé' : 'Publier'}</button>` : ''}
-                <button type="button" class="ghost-btn danger-text btn-del">Supprimer</button>
+            <div class="row-btns">
+                ${(!isPub || isOwner) ? `<button type="button" class="btn-mini btn-vis">${isPub ? 'Privé' : 'Publier'}</button>` : ''}
+                <button type="button" class="btn-mini btn-del">Suppr.</button>
             </div>
         `;
 
-        row.querySelector('.row-main').onclick = () => renderLibrary(book.id);
+        row.querySelector('.row-info').onclick = () => renderLibrary(book.id);
 
         const visBtn = row.querySelector('.btn-vis');
         if (visBtn) visBtn.onclick = async e => {
@@ -427,7 +445,7 @@ function renderLibrary(selectedId = null) {
         row.querySelector('.btn-del').onclick = async e => {
             e.stopPropagation();
             if (!confirm(`Supprimer "${book.title}" ?`)) return;
-            await fb(`focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`, "DELETE");
+            await fb(`focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`, "DELETE").catch(() => {});
             if (isPub && isOwner) await fb(`focus_read_public_books/${encodeURIComponent(book.publicId || book.id)}`, "DELETE").catch(() => {});
             accountBooks = accountBooks.filter(b => b.id !== book.id);
             renderLibrary();
@@ -465,25 +483,28 @@ async function selectChapter(idx, save = true) {
 
     $('chapter-select').value = currentChapterIndex;
     const isPaused = activeBook.pausedPositions?.[chap.id] > 0;
-    const isRead = (activeBook.readChapters || []).includes(chap.id);
-    $('start-btn').textContent = isPaused ? "Reprendre la lecture" : (isRead ? "Relire le chapitre" : "Commencer la lecture");
+    const isRead = isChapterValidated(activeBook, chap);
+    $('start-btn').textContent = isPaused ? "Reprendre la lecture" : (isRead ? "Relire le chapitre (validé)" : "Lire le chapitre");
 
     if (save && activeBook.lastIndex !== currentChapterIndex) {
         activeBook.lastIndex = currentChapterIndex;
-        await saveBookCloud(activeBook);
+        saveBookCloud(activeBook);
     }
 }
 
-// --- LECTURE & QUIZ ---
+// --- LECTURE & GÉNÉRATION DE QUIZ ROBUSTE ---
 
 function startReading() {
     const chap = activeBook?.chapters[currentChapterIndex];
     if (!chap) return;
     activeText = chap.text;
+    const validated = isChapterValidated(activeBook, chap);
     const qCount = questionCount(chap.wordCount || activeText.split(/\s+/).length);
 
     $('hud-chapter-title').textContent = chap.label;
-    $('finish-reading-btn').textContent = `Terminer & Quiz (${qCount} questions)`;
+    $('finish-reading-btn').textContent = validated
+        ? "Chapitre déjà validé · Retour à l'accueil"
+        : `Terminer & Lancer le quiz (${qCount} questions)`;
     $('text-track').textContent = activeText;
 
     showView('game-screen');
@@ -498,7 +519,7 @@ async function pauseReading() {
     if (chap) {
         activeBook.pausedPositions = { ...(activeBook.pausedPositions || {}), [chap.id]: window.scrollY };
         activeBook.updatedAt = Date.now();
-        await saveBookCloud(activeBook);
+        saveBookCloud(activeBook);
     }
     showView('setup-screen');
     renderLibrary(activeBook?.id);
@@ -510,54 +531,108 @@ function updateScroll() {
     $('scroll-percent').textContent = max <= 0 ? "100%" : `${Math.min(100, Math.round((window.scrollY / max) * 100))}%`;
 }
 
+function prepareTextForQuiz(text, maxChars = 28000) {
+    if (text.length <= maxChars) return text;
+    const part = Math.floor(maxChars / 3);
+    const mid = Math.floor((text.length - part) / 2);
+    return `${text.slice(0, part)}\n[...]\n${text.slice(mid, mid + part)}\n[...]\n${text.slice(-part)}`;
+}
+
+async function callGeminiQuiz(apiKey, text, qCount) {
+    const models = ["gemini-2.5-flash", "gemini-2.0-flash"];
+    const excerpt = prepareTextForQuiz(text);
+    const prompt = `Tu es un professeur exigeant. À partir du texte suivant, génère exactement ${qCount} questions QCM de compréhension à 3 choix (index 0, 1 ou 2) couvrant l'ensemble du passage.\nFormat JSON attendu : [{"question":"...","options":["Choix 1","Choix 2","Choix 3"],"answer":0,"explanation":"Explication courte"}]\n\nTexte :\n"""\n${excerpt}\n"""`;
+
+    let lastError = null;
+    for (const model of models) {
+        try {
+            const res = await fetchWithTimeout(
+                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{ parts: [{ text: prompt }] }],
+                        generationConfig: {
+                            responseMimeType: "application/json",
+                            temperature: 0.3
+                        }
+                    })
+                },
+                25000
+            );
+
+            const json = await res.json();
+            if (!res.ok) throw new Error(json.error?.message || `HTTP ${res.status}`);
+
+            const raw = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
+            const match = raw.match(/\[[\s\S]*\]/);
+            if (!match) throw new Error("Réponse JSON introuvable.");
+
+            const parsed = JSON.parse(match[0]);
+            const valid = parsed.filter(q =>
+                q && typeof q.question === 'string' &&
+                Array.isArray(q.options) && q.options.length >= 2 &&
+                typeof q.answer === 'number' && q.answer >= 0 && q.answer < q.options.length
+            );
+
+            if (!valid.length) throw new Error("Aucune question valide générée.");
+            return valid;
+        } catch (err) {
+            lastError = err;
+        }
+    }
+    throw lastError || new Error("Impossible de générer le quiz.");
+}
+
 async function finishAndQuiz() {
-    const apiKey = $('api-key').value.trim() || DEFAULT_API_KEY;
-    if (!apiKey) {
-        $('api-details-box').open = true;
-        alert("Renseignez votre clé API Gemini pour générer le quiz (lecture mise en pause).");
-        return pauseReading();
+    const chap = activeBook?.chapters[currentChapterIndex];
+
+    // Verrou : interdit de refaire le quiz d'un chapitre déjà validé
+    if (isChapterValidated(activeBook, chap)) {
+        if (activeBook?.pausedPositions?.[chap.id]) {
+            delete activeBook.pausedPositions[chap.id];
+            saveBookCloud(activeBook);
+        }
+        showView('setup-screen');
+        renderLibrary(activeBook?.id);
+        return;
     }
 
-    const chap = activeBook?.chapters[currentChapterIndex];
+    const storedKey = localStorage.getItem("focus_read_gemini_key") || "";
+    const apiKey = $('api-key')?.value.trim() || storedKey || DEFAULT_API_KEY;
+
+    if (!apiKey) {
+        await pauseReading();
+        if ($('api-details-box')) $('api-details-box').open = true;
+        alert("Entrez votre clé API Gemini en bas de l'accueil pour générer le quiz (votre position de lecture a été sauvegardée).");
+        return;
+    }
+
     const qCount = questionCount(chap?.wordCount || activeText.split(/\s+/).length);
     const btn = $('finish-reading-btn');
     btn.disabled = true;
-    btn.textContent = "Génération du quiz...";
+    btn.textContent = "Création du quiz en cours...";
 
     try {
-        const prompt = `Chapitre lu :\n"${activeText}"\nGénère exactement ${qCount} questions QCM (3 choix) couvrant l'ensemble du chapitre, avec un champ "explanation" court. Réponds UNIQUEMENT en JSON strict :\n[{"question":"...","options":["A","B","C"],"answer":0,"explanation":"..."}]`;
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                contents: [{ parts: [{ text: prompt }] }],
-                generationConfig: { responseMimeType: "application/json" }
-            })
-        });
-        const json = await res.json();
-        if (!res.ok) throw new Error(json.error?.message || "Erreur Gemini");
-
-        const rawText = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
-        const jsonMatch = rawText.match(/\[[\s\S]*\]/);
-        if (!jsonMatch) throw new Error("Format de réponse invalide.");
-        generatedQuiz = JSON.parse(jsonMatch[0]);
+        generatedQuiz = await callGeminiQuiz(apiKey, activeText, qCount);
 
         if (activeBook?.pausedPositions?.[chap?.id]) {
             delete activeBook.pausedPositions[chap.id];
-            await saveBookCloud(activeBook);
+            saveBookCloud(activeBook);
         }
         renderQuiz();
     } catch (e) {
-        alert("Erreur quiz : " + e.message);
+        alert("Erreur lors de la génération du quiz : " + (e.name === 'AbortError' ? "Délai dépassé (vérifiez votre connexion)." : e.message));
     } finally {
         btn.disabled = false;
-        btn.textContent = `Terminer & Quiz (${qCount} questions)`;
+        btn.textContent = `Terminer & Lancer le quiz (${qCount} questions)`;
     }
 }
 
 function renderQuiz() {
     userAnswers = {};
-    $('quiz-title').textContent = `Vérification (${generatedQuiz.length} questions)`;
+    $('quiz-title').textContent = `Quiz (${generatedQuiz.length} questions)`;
     $('abandon-quiz-btn').hidden = false;
     $('submit-quiz-btn').hidden = false;
     $('retry-chapter-btn').hidden = true;
@@ -568,15 +643,16 @@ function renderQuiz() {
     box.innerHTML = '';
     generatedQuiz.forEach((q, qi) => {
         const div = document.createElement('div');
-        div.className = 'quiz-question';
+        div.className = 'q-block';
         div.innerHTML = `<p>${qi + 1}. ${esc(q.question)}</p>`;
         q.options.forEach((opt, oi) => {
             const b = document.createElement('button');
-            b.className = 'quiz-option';
+            b.type = 'button';
+            b.className = 'q-opt';
             b.textContent = opt;
             b.onclick = () => {
                 userAnswers[qi] = oi;
-                div.querySelectorAll('.quiz-option').forEach(x => x.classList.remove('selected'));
+                div.querySelectorAll('.q-opt').forEach(x => x.classList.remove('selected'));
                 b.classList.add('selected');
             };
             div.appendChild(b);
@@ -589,14 +665,17 @@ function renderQuiz() {
 async function evaluateQuiz() {
     if (Object.keys(userAnswers).length < generatedQuiz.length) return alert("Répondez à toutes les questions.");
 
+    const chap = activeBook.chapters[currentChapterIndex];
+    const alreadyValidated = isChapterValidated(activeBook, chap);
+
     let score = 0;
-    document.querySelectorAll('.quiz-question').forEach((div, qi) => {
+    document.querySelectorAll('.q-block').forEach((div, qi) => {
         const q = generatedQuiz[qi];
         const chosen = userAnswers[qi];
         const ok = chosen === q.answer;
         if (ok) score++;
 
-        div.querySelectorAll('.quiz-option').forEach((b, i) => {
+        div.querySelectorAll('.q-opt').forEach((b, i) => {
             b.disabled = true;
             b.classList.remove('selected');
             if (i === q.answer) { b.classList.add('correct'); b.textContent = `✓ ${q.options[i]}`; }
@@ -604,38 +683,35 @@ async function evaluateQuiz() {
         });
 
         const exp = document.createElement('div');
-        exp.className = `quiz-explanation ${ok ? '' : 'is-wrong'}`;
-        exp.textContent = q.explanation || (ok ? "Bonne réponse." : `Réponse attendue : ${q.options[q.answer]}`);
+        exp.className = 'q-exp';
+        exp.textContent = q.explanation || (ok ? "Correct." : `Réponse : ${q.options[q.answer]}`);
         div.appendChild(exp);
     });
 
     const total = generatedQuiz.length;
     const perfect = score === total;
-    const pts = score * 10 + (perfect ? 20 : 0);
+    const pts = alreadyValidated ? 0 : (score * 10 + (perfect ? 20 : 0));
 
-    userStats.scoreTotal += pts;
-    userStats.quizzesCompleted += 1;
-    if (perfect) {
-        userStats.perfectScores += 1;
-        const chap = activeBook.chapters[currentChapterIndex];
-        const isNew = chap && !(activeBook.readChapters || []).includes(chap.id);
-        if (isNew) {
+    if (!alreadyValidated) {
+        userStats.scoreTotal += pts;
+        userStats.quizzesCompleted += 1;
+        if (perfect) {
+            userStats.perfectScores += 1;
             activeBook.readChapters = [...(activeBook.readChapters || []), chap.id];
             userStats.totalChaptersRead += 1;
+            if (userStats.lastReadDate === dateKey(-1)) userStats.streakDays = (userStats.streakDays || 0) + 1;
+            else if (userStats.lastReadDate !== dateKey(0)) userStats.streakDays = 1;
+            userStats.lastReadDate = dateKey(0);
+            await saveBookCloud(activeBook);
         }
-        if (userStats.lastReadDate === dateKey(-1)) userStats.streakDays = (userStats.streakDays || 0) + 1;
-        else if (userStats.lastReadDate !== dateKey(0)) userStats.streakDays = 1;
-        userStats.lastReadDate = dateKey(0);
-        await saveBookCloud(activeBook);
+        renderStats();
+        await pushStats();
     }
 
-    renderStats();
-    await pushStats();
-
     $('quiz-container').insertAdjacentHTML('afterbegin', `
-        <div class="score-card">
+        <div class="score-banner">
             <strong>${score} / ${total} (${Math.round((score / total) * 100)}%)</strong>
-            <span class="muted">+${pts} pts · ${perfect ? 'Chapitre validé ✓' : '100 % requis pour valider'}</span>
+            <span class="muted">${alreadyValidated ? 'Chapitre déjà validé (aucun point ajouté)' : `+${pts} pts · ${perfect ? 'Chapitre validé ✓' : '100 % requis pour valider'}`}</span>
         </div>
     `);
 
@@ -643,42 +719,42 @@ async function evaluateQuiz() {
     $('abandon-quiz-btn').hidden = true;
     $('submit-quiz-btn').hidden = true;
     $('restart-btn').hidden = false;
-    $('retry-chapter-btn').hidden = perfect;
+    $('retry-chapter-btn').hidden = perfect || alreadyValidated;
     if (currentChapterIndex + 1 < activeBook.chapters.length) {
         $('next-chapter-btn').textContent = `Lire ${activeBook.chapters[currentChapterIndex + 1].label} →`;
         $('next-chapter-btn').hidden = false;
     }
 }
 
-// --- MODALES (COMMUNAUTÉ, CLASSEMENT, GUIDE) ---
+// --- MODALES ---
 
 async function openCommunity() {
     $('community-overlay').hidden = false;
     const list = $('community-list');
-    list.innerHTML = '<div class="list-row"><span class="muted">Chargement...</span></div>';
+    list.innerHTML = '<div class="row"><span class="muted">Chargement...</span></div>';
 
     try {
         const data = await fb('focus_read_public_books');
-        if (!data) return (list.innerHTML = '<div class="list-row"><span class="muted">Aucun livre partagé.</span></div>');
+        if (!data) return (list.innerHTML = '<div class="row"><span class="muted">Aucun livre disponible.</span></div>');
 
         const owned = new Set(accountBooks.flatMap(b => [b.id, b.publicId].filter(Boolean)));
         list.innerHTML = '';
         Object.values(data).sort((a, b) => (b.publishedAt || 0) - (a.publishedAt || 0)).forEach(pub => {
             const has = owned.has(pub.id) || owned.has(pub.localId);
             const row = document.createElement('div');
-            row.className = 'list-row';
+            row.className = 'row';
             row.innerHTML = `
-                <div class="row-main">
+                <div class="row-info">
                     <span class="row-title">${esc(pub.title)}</span>
-                    <span class="row-meta">${esc(pub.sharedBy || "Anonyme")} · ${pub.chapterCount || "?"} ch.</span>
+                    <span class="row-sub">${esc(pub.sharedBy || "Anonyme")} · ${pub.chapterCount || "?"} ch.</span>
                 </div>
-                <button class="ghost-btn" ${has ? 'disabled' : ''}>${has ? 'Ajouté ✓' : '+ Ajouter'}</button>
+                <button type="button" class="btn-mini" ${has ? 'disabled' : ''}>${has ? 'Ajouté' : '+ Ajouter'}</button>
             `;
             const btn = row.querySelector('button');
             if (!has) btn.onclick = async () => {
                 btn.disabled = true;
-                btn.textContent = "Ajout...";
-                const chaps = (Array.isArray(pub.chapters) ? pub.chapters : Object.values(pub.chapters || {})).filter(c => c?.text);
+                btn.textContent = "...";
+                const chaps = (Array.isArray(pub.chapters) ? pub.chapters : Object.values(pub.chapters || {})).filter(c => c && c.text);
                 if (!chaps.length) {
                     btn.disabled = false;
                     btn.textContent = "+ Ajouter";
@@ -688,13 +764,13 @@ async function openCommunity() {
                     id: cleanKey(pub.localId || pub.id), publicId: pub.id, title: pub.title, fileName: pub.fileName,
                     visibility: 'public', sharedBy: pub.sharedBy, chapters: chaps, readChapters: [], pausedPositions: {}, lastIndex: 0, updatedAt: Date.now()
                 });
-                if (ok) { renderLibrary(cleanKey(pub.localId || pub.id)); btn.textContent = "Ajouté ✓"; }
+                if (ok) { renderLibrary(cleanKey(pub.localId || pub.id)); btn.textContent = "Ajouté"; }
                 else { btn.disabled = false; btn.textContent = "+ Ajouter"; }
             };
             list.appendChild(row);
         });
     } catch (e) {
-        list.innerHTML = `<div class="list-row"><span class="muted">Erreur : ${e.message}</span></div>`;
+        list.innerHTML = `<div class="row"><span class="muted">Erreur : ${e.message}</span></div>`;
     }
 }
 
@@ -702,35 +778,31 @@ async function openLeaderboard() {
     $('leaderboard-overlay').hidden = false;
     updateAccountUI();
     const list = $('leaderboard-list');
-    list.innerHTML = '<div class="list-row"><span class="muted">Chargement...</span></div>';
+    list.innerHTML = '<div class="row"><span class="muted">Chargement...</span></div>';
 
     try {
         const data = await fb('focus_read_users');
-        if (!data) return (list.innerHTML = '<div class="list-row"><span class="muted">Aucun lecteur.</span></div>');
+        if (!data) return (list.innerHTML = '<div class="row"><span class="muted">Aucun lecteur.</span></div>');
 
         list.innerHTML = Object.entries(data)
             .map(([k, v]) => ({ k, pts: v.scoreTotal || 0, ch: v.totalChaptersRead || v.perfectScores || 0, st: getStreak(v) }))
             .sort((a, b) => b.pts - a.pts)
             .slice(0, 30)
             .map((p, i) => `
-                <div class="list-row ${p.k === syncKey ? 'me' : ''}">
-                    <div class="row-main">
-                        <span class="row-title">#${i + 1} ${esc(p.k)}</span>
-                        <span class="row-meta">Série ${p.st} j · ${p.ch} ch.</span>
+                <div class="row ${p.k === syncKey ? 'me' : ''}">
+                    <div class="row-info">
+                        <span class="row-title">${i + 1}. ${esc(p.k)}</span>
+                        <span class="row-sub">Série ${p.st} j · ${p.ch} ch.</span>
                     </div>
                     <strong>${p.pts} pts</strong>
                 </div>
             `).join('');
     } catch (e) {
-        list.innerHTML = `<div class="list-row"><span class="muted">Erreur : ${e.message}</span></div>`;
+        list.innerHTML = `<div class="row"><span class="muted">Erreur : ${e.message}</span></div>`;
     }
 }
 
 // --- ÉVÉNEMENTS & INIT ---
-
-// --- ÉVÉNEMENTS & INIT ---
-
-const on = (id, ev, fn) => { const el = $(id); if (el) el[ev] = fn; };
 
 const updateApiTag = () => {
     const ok = Boolean($('api-key')?.value.trim() || DEFAULT_API_KEY);
@@ -753,7 +825,7 @@ on('pause-reading-btn', 'onclick', pauseReading);
 window.addEventListener('scroll', updateScroll, { passive: true });
 on('finish-reading-btn', 'onclick', finishAndQuiz);
 
-on('abandon-quiz-btn', 'onclick', () => confirm("Abandonner le quiz ?") && (showView('setup-screen'), renderLibrary(activeBook?.id)));
+on('abandon-quiz-btn', 'onclick', () => confirm("Quitter le quiz ?") && (showView('setup-screen'), renderLibrary(activeBook?.id)));
 on('submit-quiz-btn', 'onclick', evaluateQuiz);
 on('retry-chapter-btn', 'onclick', startReading);
 on('next-chapter-btn', 'onclick', async () => { await selectChapter(currentChapterIndex + 1, true); startReading(); });
@@ -768,7 +840,7 @@ document.querySelectorAll('[data-close]').forEach(btn => btn.onclick = () => {
     const target = $(btn.dataset.close);
     if (target) target.hidden = true;
 });
-document.querySelectorAll('.overlay').forEach(ov => ov.onclick = e => { if (e.target === ov) ov.hidden = true; });
+document.querySelectorAll('.modal-bg').forEach(ov => ov.onclick = e => { if (e.target === ov) ov.hidden = true; });
 
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
