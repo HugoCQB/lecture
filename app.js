@@ -1276,9 +1276,23 @@ $('btnLeaderboard').addEventListener('click', ouvrirClassement);
 $('btnCloseLeaderboard').addEventListener('click', () => $('leaderboard-overlay').classList.add('hidden'));
 
 // Enregistrement du Service Worker PWA
+
+
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
-        navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW non enregistré:', err));
+        navigator.serviceWorker.register('./sw.js').then(reg => {
+            // Vérifie s'il y a une mise à jour à chaque ouverture
+            reg.update();
+        }).catch(err => console.warn('SW non enregistré:', err));
+
+        // Recharge automatiquement la page dès que le nouveau Service Worker est actif
+        let refreshing = false;
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+            if (!refreshing) {
+                refreshing = true;
+                window.location.reload();
+            }
+        });
     });
 }
 
