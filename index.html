@@ -2,168 +2,155 @@
 <html lang="fr">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-    <title>FOCUS // LIBRARY</title>
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='45' fill='%23f7f7f7'/></svg>">
-    
-    <!-- PWA -->
-    <link rel="manifest" href="manifest.json">
-    <meta name="theme-color" content="#080808">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="theme-color" content="#0a0a0a">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-
-    <!-- JSZip pour extraire le texte des fichiers EPUB -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
-    
+    <title>Focus Read</title>
+    <link rel="manifest" href="manifest.json">
     <link rel="stylesheet" href="style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 <body>
 
-    <!-- 1. BIBLIOTHÈQUE & CONFIGURATION -->
-    <div class="panel" id="setup-screen">
+    <!-- ACCUEIL -->
+    <main id="setup-screen" class="container">
         <header class="top-bar">
-            <button class="account-badge" id="btnSyncKey" title="Gérer votre identifiant et la synchronisation">
-                <span class="sync-dot" id="syncDot"></span>
-                <span id="syncKeyLabel">Compte</span>
+            <button id="btnSyncKey" type="button" class="link-btn account-btn" title="Changer de compte">
+                <span class="dot" id="syncDot"></span>
+                <span id="syncKeyLabel">Chargement...</span>
             </button>
-
-            <button class="pill-btn icon-pill" id="btnLeaderboard">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 0 1 0-5H6"/><path d="M18 9h1.5a2.5 2.5 0 0 0 0-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0 0 12 0V2Z"/></svg>
-                <span>Classement</span>
-            </button>
+            <nav class="top-nav">
+                <button id="btnTutorial" type="button" class="ghost-btn">Guide</button>
+                <button id="btnLeaderboard" type="button" class="ghost-btn">Classement</button>
+            </nav>
         </header>
 
-        <div class="status-strip">
-            <span id="syncStatus" class="sync-indicator">Sync : Local</span>
-        </div>
+        <p class="sync-note" id="syncStatus">Initialisation...</p>
 
-        <!-- STATISTIQUES GLOBALES : STREAK & CHAPITRES LUS -->
-        <section class="global-stats-bar">
-            <div class="stat-card">
-                <span class="stat-value" id="stat-streak">0 j</span>
-                <span class="stat-label">Streak</span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-value" id="stat-chapters">0</span>
-                <span class="stat-label">Chapitres lus</span>
-            </div>
-            <div class="stat-card">
-                <span class="stat-value" id="stat-score">0</span>
-                <span class="stat-label">Points</span>
+        <section class="stats-row" aria-label="Statistiques">
+            <div><strong id="stat-streak">0 j</strong><span>Série</span></div>
+            <div><strong id="stat-chapters">0</strong><span>Chapitres</span></div>
+            <div><strong id="stat-score">0</strong><span>Points</span></div>
+        </section>
+
+        <section class="section">
+            <div class="actions-split">
+                <button type="button" id="file-drop-zone" class="ghost-btn block-btn">
+                    <span id="file-label">+ Importer EPUB / TXT</span>
+                </button>
+                <button type="button" id="btnCommunity" class="ghost-btn block-btn">
+                    Bibliothèque commune
+                </button>
+                <input type="file" id="file-input" accept=".epub,.txt" hidden>
             </div>
         </section>
 
-        <!-- CLÉ API GEMINI -->
-        <div class="field">
-            <label for="api-key">Clé API Gemini</label>
-            <input type="password" id="api-key" placeholder="AIzaSy... (sauvegardée localement)">
-        </div>
+        <section class="section" id="library-box" hidden>
+            <h2 class="section-title">Mes livres</h2>
+            <div id="library-list" class="clean-list"></div>
+        </section>
 
-        <!-- AJOUTER UN LIVRE : IMPORT LOCAL OU COMMUNAUTÉ -->
-        <div class="field">
-            <label>Ajouter un livre</label>
-            <div class="add-book-grid">
-                <div class="file-drop" id="file-drop-zone" role="button" tabindex="0">
-                    <span class="file-icon">+</span>
-                    <span id="file-label">Importer EPUB / TXT</span>
-                    <span class="file-hint">Partagé en public par défaut</span>
-                    <input type="file" id="file-input" accept=".epub,.txt" style="display:none">
-                </div>
-
-                <button type="button" class="community-card-btn" id="btnCommunity">
-                    <svg class="comm-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20"/><path d="M2 12h20"/></svg>
-                    <span class="comm-title">Communauté</span>
-                    <span class="file-hint">Explorer les livres partagés</span>
-                </button>
+        <section class="section" id="chapter-selector-box" hidden>
+            <div class="progress-head">
+                <span id="book-title-label" class="book-active-title">Livre</span>
+                <span id="book-progress-text" class="muted">0/0</span>
             </div>
-        </div>
-
-        <!-- MA BIBLIOTHÈQUE LOCALE (INDEXEDDB) -->
-        <div class="field" id="library-box" style="display:none;">
-            <label>Ma Bibliothèque</label>
-            <div id="library-list" class="library-list"></div>
-        </div>
-
-        <!-- PROGRESSION & SÉLECTEUR DE CHAPITRE DU LIVRE ACTIF -->
-        <div class="field active-book-card" id="chapter-selector-box" style="display:none;">
-            <div class="book-progress-header">
-                <label for="chapter-select" id="book-title-label">Livre actif</label>
-                <span id="book-progress-text" class="progress-badge">0% lu</span>
-            </div>
-            <div class="book-progress-bar-bg">
-                <div id="book-progress-bar-fill" class="book-progress-bar-fill"></div>
-            </div>
+            <div class="progress-track"><div id="book-progress-bar-fill"></div></div>
             <select id="chapter-select"></select>
-        </div>
+        </section>
 
-        <button class="action-btn" id="start-btn" disabled>Sélectionnez ou importez un livre</button>
-    </div>
-
-    <!-- 2. ZONE DE LECTURE LIBRE AVEC PAUSE -->
-    <div id="game-screen">
-        <div class="hud">
-            <button class="pill-btn" id="pause-reading-btn">Pause</button>
-            <span id="hud-chapter-title">Lecture en cours</span>
-            <span id="scroll-percent" class="scroll-badge">0%</span>
-        </div>
-
-        <div class="scroll-viewport" id="viewport">
-            <div id="text-track"></div>
-            <div class="end-reading-box">
-                <p>Fin du chapitre atteinte</p>
-                <button class="action-btn" id="finish-reading-btn">Terminer & Générer le quiz</button>
+        <details class="api-box" id="api-details-box">
+            <summary>
+                <span>Clé API Gemini</span>
+                <span id="api-status-tag" class="muted">Requise</span>
+            </summary>
+            <div class="api-body">
+                <input type="password" id="api-key" placeholder="AIzaSy..." autocomplete="off">
+                <small class="muted">Enregistrée uniquement sur cet appareil pour générer les quiz.</small>
             </div>
-        </div>
-    </div>
+        </details>
 
-    <!-- 3. INTERROGATOIRE IA DE FIN -->
-    <div class="panel" id="quiz-screen">
-        <div class="quiz-header">
-            <h2 id="quiz-title">Vérification de lecture</h2>
-            <p class="subtitle">
-                Obtenez 100 % de bonnes réponses pour valider ce chapitre et maintenir votre streak.
-            </p>
+        <div class="bottom-cta">
+            <button id="start-btn" class="primary-btn" disabled>Importez ou ajoutez un livre</button>
         </div>
+    </main>
+
+    <!-- LECTURE -->
+    <section id="game-screen" hidden>
+        <header class="read-hud">
+            <button id="pause-reading-btn" type="button" class="ghost-btn">Pause</button>
+            <span id="hud-chapter-title">Chapitre</span>
+            <span id="scroll-percent" class="muted">0%</span>
+        </header>
+
+        <article id="text-track"></article>
+
+        <footer class="read-end">
+            <p class="muted">Fin du chapitre.</p>
+            <button id="finish-reading-btn" class="primary-btn">Terminer &amp; Lancer le quiz</button>
+        </footer>
+    </section>
+
+    <!-- QUIZ -->
+    <section id="quiz-screen" class="container" hidden>
+        <header class="top-bar">
+            <h2 id="quiz-title">Vérification</h2>
+            <button id="abandon-quiz-btn" type="button" class="ghost-btn danger-text">Abandonner</button>
+        </header>
+
         <div id="quiz-container"></div>
-        <button class="action-btn" id="submit-quiz-btn">Valider mes réponses</button>
-        <button class="action-btn" id="retry-chapter-btn" style="display:none; margin-top: 0.8rem;">Relire ce chapitre</button>
-        <button class="action-btn" id="next-chapter-btn" style="display:none; margin-top: 0.8rem;">Chapitre suivant →</button>
-        <button class="action-btn secondary-btn" id="restart-btn" style="display:none; margin-top: 0.6rem;">Retour à la bibliothèque</button>
+
+        <div class="bottom-cta stack">
+            <button id="submit-quiz-btn" class="primary-btn">Valider mes réponses</button>
+            <button id="retry-chapter-btn" class="primary-btn" hidden>Relire le chapitre</button>
+            <button id="next-chapter-btn" class="primary-btn" hidden>Chapitre suivant</button>
+            <button id="restart-btn" class="ghost-btn block-btn" hidden>Retour à l'accueil</button>
+        </div>
+    </section>
+
+    <!-- MODALE GUIDE -->
+    <div id="tutorial-overlay" class="overlay" hidden>
+        <div class="modal">
+            <header class="top-bar">
+                <h2>Guide rapide</h2>
+                <button type="button" class="ghost-btn" data-close="tutorial-overlay">Fermer</button>
+            </header>
+            <div class="modal-body guide-list">
+                <p><strong>1. Compte synchronisé</strong> — Cliquez sur votre identifiant en haut à gauche pour définir votre pseudo et un mot de passe optionnel.</p>
+                <p><strong>2. Ajouter des textes</strong> — Importez un <code>.epub</code> ou <code>.txt</code>, ou piochez dans la <em>Bibliothèque commune</em>.</p>
+                <blockquote class="tip">
+                    <strong>Astuce WebToEpub :</strong> installez l'extension gratuite <em>WebToEpub</em> (Chrome, Firefox, Edge) pour convertir n'importe quel roman web ou article en fichier <code>.epub</code> en un clic.
+                </blockquote>
+                <p><strong>3. Lecture &amp; Quiz</strong> — Utilisez <em>Pause</em> pour sauvegarder votre position. Un score de <strong>100 %</strong> au quiz valide le chapitre, maintient votre série et ajoute des points.</p>
+            </div>
+        </div>
     </div>
 
-    <!-- 4. MODALE CLASSEMENT FIREBASE -->
-    <div class="overlay hidden" id="leaderboard-overlay">
-        <div class="panel modal-panel">
-            <div class="modal-header">
+    <!-- MODALE BIBLIOTHÈQUE COMMUNE -->
+    <div id="community-overlay" class="overlay" hidden>
+        <div class="modal">
+            <header class="top-bar">
+                <h2>Bibliothèque commune</h2>
+                <button type="button" class="ghost-btn" data-close="community-overlay">Fermer</button>
+            </header>
+            <div id="community-list" class="clean-list modal-body"></div>
+        </div>
+    </div>
+
+    <!-- MODALE CLASSEMENT -->
+    <div id="leaderboard-overlay" class="overlay" hidden>
+        <div class="modal">
+            <header class="top-bar">
                 <h2>Classement</h2>
-                <button class="pill-btn" id="btnCloseLeaderboard">Fermer</button>
-            </div>
-            <p class="subtitle" style="margin-bottom: 1rem;">
-                Votre identifiant : <strong id="current-lb-key">---</strong>
-            </p>
-            <div id="leaderboard-list" class="leaderboard-list">
-                Chargement...
-            </div>
+                <button type="button" class="ghost-btn" data-close="leaderboard-overlay">Fermer</button>
+            </header>
+            <p class="muted small">Compte : <strong id="current-lb-key">—</strong></p>
+            <div id="leaderboard-list" class="clean-list modal-body"></div>
         </div>
     </div>
 
-    <!-- 5. MODALE BIBLIOTHÈQUE COMMUNE (LIVRES PUBLICS) -->
-    <div class="overlay hidden" id="community-overlay">
-        <div class="panel modal-panel">
-            <div class="modal-header">
-                <h2>Bibliothèque Commune</h2>
-                <button class="pill-btn" id="btnCloseCommunity">Fermer</button>
-            </div>
-            <p class="subtitle" style="margin-bottom: 1rem;">
-                Livres partagés par la communauté. Ajoutez-les à votre bibliothèque pour suivre votre propre avancement.
-            </p>
-            <div id="community-list" class="leaderboard-list">
-                Chargement des livres publics...
-            </div>
-        </div>
-    </div>
-
-    <script src="config.js"></script>
+    <script src="env.js"></script>
     <script src="app.js"></script>
 </body>
 </html>
