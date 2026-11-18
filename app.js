@@ -8,56 +8,102 @@ const DEFAULT_API_KEY = (typeof ENV !== 'undefined' && ENV.DEFAULT_GEMINI_API_KE
     ? ENV.DEFAULT_GEMINI_API_KEY 
     : "";
 
-// CONFIGURATION DIFFICULTÉ & TAILLE DES SEGMENTS
-const DIFFICULTY_CONFIG = {
-    easy: {
-        label: "FACILE",
-        questionCount: 3,
-        choicesCount: 3,
-        multiplier: 1,
-        promptRule: "Pose 3 questions simples et directes sur les événements ou idées principales du texte, avec 3 choix de réponse chacune."
-    },
-    medium: {
-        label: "MOYEN",
-        questionCount: 4,
-        choicesCount: 3,
-        multiplier: 1.5,
-        promptRule: "Pose 4 questions précises portant sur des détails concrets et des faits secondaires du texte, avec 3 choix de réponse chacune."
-    },
-    hard: {
-        label: "DIFFICILE",
-        questionCount: 5,
-        choicesCount: 4,
-        multiplier: 2,
-        promptRule: "Pose 5 questions exigeantes et pointues (détails subtils, chronologie exacte, déductions fines, pièges plausibles) avec 4 choix de réponse chacune."
-    }
-};
-
-const LENGTH_CONFIG = {
-    short: { maxWordsPerPart: 250 },
-    medium: { maxWordsPerPart: 550 },
-    long: { maxWordsPerPart: 950 }
-};
-
 // ÉTAT DE L'APPLICATION & BIBLIOTHÈQUE
-let activeBook = null; // { id, title, fileName, rawChapters, chapters, readChapters: [], lastIndex: 0 }
+let activeBook = null; // { id, publicId, title, fileName, visibility, sharedBy, chapters, readChapters: [], pausedPositions: {}, lastIndex: 0 }
 let currentChapterIndex = 0;
 let activeText = "";
 let activeChapterLabel = "";
 let generatedQuiz = [];
 let userAnswers = {};
 
-// ÉTAT FIREBASE & CLASSEMENT
+// ÉTAT FIREBASE, STREAK & CLASSEMENT
 let syncKey = localStorage.getItem("focus_read_sync_key") || null;
 let currentKeyPassword = localStorage.getItem("focus_read_sync_pwd") || "";
 let userStats = JSON.parse(localStorage.getItem("focus_read_stats") || "null") || {
     scoreTotal: 0,
     quizzesCompleted: 0,
-    perfectScores: 0
+    perfectScores: 0,
+    totalChaptersRead: 0,
+    streakDays: 0,
+    lastReadDate: null
 };
 
+if (typeof userStats.totalChaptersRead !== "number") {
+    userStats.totalChaptersRead = userStats.perfectScores || 0;
+}
+if (typeof userStats.streakDays !== "number") {
+    userStats.streakDays = 0;
+}
+
 // ==========================================
-// 1. BASE DE DONNÉES LOCALE (INDEXEDDB)
+// 1. GESTION DE LA STREAK & STATS GLOBALES
+// ==========================================
+
+function getLocalDateKey(offsetDays = 0) {
+    const d = new Date();
+    d.setDate(d.getDate() + offsetDays);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+}
+
+function getEffectiveStreak(stats) {
+    if (!stats || !stats.lastReadDate || !stats.streakDays) return 0;
+    const today = getLocalDateKey(0);
+    const yesterday = getLocalDateKey(-1);
+    if (stats.lastReadDate === today || stats.lastReadDate === yesterday) {
+        return stats.streakDays;
+    }
+    return 0;
+}
+
+function recordValidatedChapterStats(isNewlyValidatedChapter) {
+    const today = getLocalDateKey(0);
+    const yesterday = getLocalDateKey(-1);
+
+    if (userStats.lastReadDate === today) {
+        if (!userStats.streakDays || userStats.streakDays < 1) {
+            userStats.streakDays = 1;
+        }
+    } else if (userStats.lastReadDate === yesterday) {
+        userStats.streakDays = (userStats.streakDays || 0) + 1;
+    } else {
+        userStats.streakDays = 1;
+    }
+
+    userStats.lastReadDate = today;
+
+    if (isNewlyValidatedChapter) {
+        userStats.totalChaptersRead = (userStats.totalChaptersRead || 0) + 1;
+    }
+}
+
+function renderGlobalStatsUI() {
+    const activeStreak = getEffectiveStreak(userStats);
+    const chaptersRead = userStats.totalChaptersRead || 0;
+    const score = userStats.scoreTotal || 0;
+
+    if ($('stat-streak')) $('stat-streak').innerText = `${activeStreak} j`;
+    if ($('stat-chapters')) $('stat-chapters').innerText = `${chaptersRead}`;
+    if ($('stat-score')) $('stat-score').innerText = `${score}`;
+}
+
+// ==========================================
+// 2. NOMBRE DE QUESTIONS PROPORTIONNEL (RENFORCÉ)
+// ==========================================
+
+function calculateQuestionCount(wordCount) {
+    if (wordCount < 300) return 8;
+    if (wordCount < 700) return 10;
+    if (wordCount < 1300) return 13;
+    if (wordCount < 2200) return 16;
+    if (wordCount < 3500) return 19;
+    return Math.min(22, 19 + Math.floor((wordCount - 3500) / 500) + 1);
+}
+
+// ==========================================
+// 3. BASE DE DONNÉES LOCALE (INDEXEDDB)
 // ==========================================
 
 const DB_NAME = "FocusReadLibraryDB";
@@ -119,7 +165,7 @@ async function dbDeleteBook(id) {
 }
 
 // ==========================================
-// 2. PRÉFÉRENCES LOCALES (CLÉ GEMINI, DIFFICULTÉ, TAILLE)
+// 4. PRÉFÉRENCES LOCALES
 // ==========================================
 
 function loadLocalPreferences() {
@@ -128,16 +174,6 @@ function loadLocalPreferences() {
         $('api-key').value = savedKey;
     } else if (DEFAULT_API_KEY) {
         $('api-key').value = DEFAULT_API_KEY;
-    }
-
-    const savedDiff = localStorage.getItem("focus_read_difficulty");
-    if (savedDiff && DIFFICULTY_CONFIG[savedDiff]) {
-        $('difficulty').value = savedDiff;
-    }
-
-    const savedLen = localStorage.getItem("focus_read_length");
-    if (savedLen && LENGTH_CONFIG[savedLen]) {
-        $('text-length').value = savedLen;
     }
 }
 
@@ -151,25 +187,39 @@ function saveGeminiKey(val) {
 }
 
 // ==========================================
-// 3. IMPORTATION EPUB / TXT & GESTION BIBLIOTHÈQUE
+// 5. IMPORTATION EPUB / TXT (PUBLIC PAR DÉFAUT)
 // ==========================================
+
+function sanitizeFirebaseKey(rawKey) {
+    return String(rawKey).replace(/[.#$\[\]/]/g, '_').trim();
+}
+
+function buildSafeFirebaseBookId(bookRecord) {
+    const cleanTitle = (bookRecord.title || "livre")
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .replace(/[^a-zA-Z0-9]/g, "_")
+        .replace(/_+/g, "_")
+        .substring(0, 24);
+    const sizeTag = bookRecord.id.split('_').pop() || Date.now();
+    return `${cleanTitle}_${sizeTag}`;
+}
 
 async function handleFileUpload(event) {
     const file = event.target.files[0];
     if (!file) return;
 
     const label = $('file-label');
-    label.innerText = `Analyse et sauvegarde de "${file.name}"...`;
+    label.innerText = `Analyse de "${file.name}"...`;
 
     try {
-        const bookId = `book_${file.name}_${file.size}`;
+        const bookId = sanitizeFirebaseKey(`book_${file.name}_${file.size}`);
         let bookTitle = file.name.replace(/\.(epub|txt)$/i, '');
-        let rawChapters = [];
+        let chapters = [];
 
         if (file.name.toLowerCase().endsWith('.epub')) {
-            const epubData = await extractRawChaptersFromEPUB(file);
+            const epubData = await extractChaptersFromEPUB(file);
             bookTitle = epubData.bookTitle;
-            rawChapters = epubData.rawChapters;
+            chapters = epubData.chapters;
         } else {
             const rawTxt = await file.text();
             const clean = rawTxt
@@ -178,95 +228,59 @@ async function handleFileUpload(event) {
                 .replace(/\n{3,}/g, '\n\n')
                 .trim();
             if (clean.length < 30) throw new Error("Le fichier texte est trop court.");
-            rawChapters = [{ chapterNum: 1, title: bookTitle, text: clean }];
+            chapters = [{
+                id: "chap_1",
+                chapterNum: 1,
+                label: `Chapitre 1 : ${bookTitle}`,
+                text: clean,
+                wordCount: clean.split(/\s+/).filter(Boolean).length
+            }];
         }
 
-        if (rawChapters.length === 0) {
+        if (chapters.length === 0) {
             throw new Error("Aucun chapitre lisible trouvé dans ce fichier.");
         }
 
-        const segments = buildSegmentsFromRawChapters(rawChapters);
-
-        // Conserver les chapitres déjà lus si le livre existait déjà
         const existing = await dbGetBook(bookId);
         const readChapters = existing ? (existing.readChapters || []) : [];
+        const pausedPositions = existing ? (existing.pausedPositions || {}) : {};
+        const targetVisibility = existing ? (existing.visibility || 'public') : 'public';
 
         const bookRecord = {
             id: bookId,
+            publicId: existing?.publicId || null,
             title: bookTitle,
             fileName: file.name,
-            rawChapters,
-            chapters: segments,
+            visibility: targetVisibility,
+            sharedBy: syncKey || "Anonyme",
+            chapters,
             readChapters,
-            lastIndex: existing ? Math.min(existing.lastIndex || 0, segments.length - 1) : 0,
+            pausedPositions,
+            lastIndex: existing ? Math.min(existing.lastIndex || 0, chapters.length - 1) : 0,
             updatedAt: Date.now()
         };
+
+        if (bookRecord.visibility === 'public') {
+            label.innerText = `Publication commune...`;
+            const ok = await publishBookToPublicLibrary(bookRecord);
+            if (!ok) {
+                bookRecord.visibility = 'private';
+            }
+        }
 
         await dbSaveBook(bookRecord);
         localStorage.setItem("focus_read_active_book_id", bookId);
 
         await refreshLibraryUI(bookId);
-        label.innerText = `+ Importer un autre fichier EPUB ou TXT`;
+        label.innerText = `Importer EPUB / TXT`;
         $('file-input').value = '';
     } catch (err) {
         alert("Impossible d'importer ce fichier : " + err.message);
-        label.innerText = "Erreur lors du chargement. Réessayez.";
+        label.innerText = "Erreur. Réessayez.";
     }
 }
 
-function buildSegmentsFromRawChapters(rawChapters) {
-    const lenKey = $('text-length').value || 'medium';
-    const MAX_WORDS_PER_PART = LENGTH_CONFIG[lenKey].maxWordsPerPart;
-    const segments = [];
-
-    for (const rc of rawChapters) {
-        const paragraphs = rc.text.split(/\n\n+/);
-        const totalWords = rc.text.split(/\s+/).filter(Boolean).length;
-        const titleSuffix = rc.title ? ` : ${rc.title}` : "";
-
-        if (totalWords <= MAX_WORDS_PER_PART) {
-            segments.push({
-                id: `c${rc.chapterNum}_p1`,
-                label: `Chapitre ${rc.chapterNum}${titleSuffix}`,
-                text: rc.text,
-                wordCount: totalWords
-            });
-            continue;
-        }
-
-        const parts = [];
-        let currentPart = [];
-        let currentWords = 0;
-
-        for (const p of paragraphs) {
-            const pWords = p.split(/\s+/).filter(Boolean).length;
-            if (currentWords + pWords > MAX_WORDS_PER_PART && currentPart.length > 0) {
-                parts.push(currentPart.join('\n\n'));
-                currentPart = [p];
-                currentWords = pWords;
-            } else {
-                currentPart.push(p);
-                currentWords += pWords;
-            }
-        }
-        if (currentPart.length > 0) {
-            parts.push(currentPart.join('\n\n'));
-        }
-
-        parts.forEach((partText, idx) => {
-            segments.push({
-                id: `c${rc.chapterNum}_p${idx + 1}`,
-                label: `Chapitre ${rc.chapterNum}${titleSuffix} — Partie ${idx + 1}/${parts.length}`,
-                text: partText,
-                wordCount: partText.split(/\s+/).filter(Boolean).length
-            });
-        });
-    }
-
-    return segments;
-}
-
-async function extractRawChaptersFromEPUB(file) {
+async function extractChaptersFromEPUB(file) {
     if (typeof JSZip === 'undefined') {
         throw new Error("Bibliothèque JSZip non chargée.");
     }
@@ -297,7 +311,7 @@ async function extractRawChaptersFromEPUB(file) {
     });
 
     const spineItems = opfDoc.querySelectorAll("spine > itemref");
-    const rawChapters = [];
+    const chapters = [];
     let chapterCounter = 1;
 
     for (const itemref of spineItems) {
@@ -338,15 +352,99 @@ async function extractRawChaptersFromEPUB(file) {
         const wordCount = chapterText.split(/\s+/).filter(Boolean).length;
         if (wordCount < 45) continue;
 
-        rawChapters.push({
+        const titleSuffix = detectedTitle ? ` : ${detectedTitle}` : "";
+        chapters.push({
+            id: `chap_${chapterCounter}`,
             chapterNum: chapterCounter,
-            title: detectedTitle,
-            text: chapterText
+            label: `Chapitre ${chapterCounter}${titleSuffix}`,
+            text: chapterText,
+            wordCount
         });
         chapterCounter++;
     }
 
-    return { bookTitle, rawChapters };
+    return { bookTitle, chapters };
+}
+
+// ==========================================
+// 6. PUBLICATION PUBLIC / PRIVÉ SUR FIREBASE
+// ==========================================
+
+async function publishBookToPublicLibrary(bookRecord) {
+    if (!navigator.onLine) {
+        return false;
+    }
+
+    try {
+        const fbBookId = bookRecord.publicId || buildSafeFirebaseBookId(bookRecord);
+        bookRecord.publicId = fbBookId;
+
+        const metaPayload = {
+            id: fbBookId,
+            localId: bookRecord.id,
+            title: bookRecord.title || "Sans titre",
+            fileName: bookRecord.fileName || "livre.epub",
+            sharedBy: syncKey || bookRecord.sharedBy || "Anonyme",
+            chapterCount: bookRecord.chapters.length,
+            publishedAt: Date.now()
+        };
+
+        const metaRes = await fetch(
+            `${FIREBASE_DB_URL}/focus_read_public_books/${encodeURIComponent(fbBookId)}.json`,
+            {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(metaPayload)
+            }
+        );
+
+        if (!metaRes.ok) {
+            const errText = await metaRes.text();
+            throw new Error(`HTTP ${metaRes.status} (${errText})`);
+        }
+
+        for (let i = 0; i < bookRecord.chapters.length; i++) {
+            const chap = bookRecord.chapters[i];
+            const chapRes = await fetch(
+                `${FIREBASE_DB_URL}/focus_read_public_books/${encodeURIComponent(fbBookId)}/chapters/${i}.json`,
+                {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        id: chap.id,
+                        chapterNum: chap.chapterNum,
+                        label: chap.label,
+                        text: chap.text,
+                        wordCount: chap.wordCount
+                    })
+                }
+            );
+            if (!chapRes.ok) {
+                throw new Error(`Échec sur le chapitre ${i + 1} (HTTP ${chapRes.status})`);
+            }
+        }
+
+        return true;
+    } catch (e) {
+        console.error("Erreur publication publique:", e);
+        alert("Impossible de publier en public (sauvegardé en privé) : " + e.message);
+        return false;
+    }
+}
+
+async function deletePublicBookFromFirebase(bookRecord) {
+    if (!navigator.onLine) return true;
+    const targetId = bookRecord.publicId || bookRecord.id;
+
+    try {
+        const res = await fetch(`${FIREBASE_DB_URL}/focus_read_public_books/${encodeURIComponent(targetId)}.json`, {
+            method: "DELETE"
+        });
+        return res.ok;
+    } catch (e) {
+        console.error("Erreur suppression publique:", e);
+        return false;
+    }
 }
 
 async function refreshLibraryUI(selectedBookId = null) {
@@ -359,9 +457,8 @@ async function refreshLibraryUI(selectedBookId = null) {
     if (books.length === 0) {
         libBox.style.display = 'none';
         $('chapter-selector-box').style.display = 'none';
-        $('preview-box').style.display = 'none';
         $('start-btn').disabled = true;
-        $('start-btn').innerText = "Importez un livre EPUB / TXT";
+        $('start-btn').innerText = "Importez ou téléchargez un livre";
         activeBook = null;
         return;
     }
@@ -375,15 +472,24 @@ async function refreshLibraryUI(selectedBookId = null) {
         const total = book.chapters.length;
         const readCount = (book.readChapters || []).filter(id => book.chapters.some(c => c.id === id)).length;
         const pct = total > 0 ? Math.round((readCount / total) * 100) : 0;
+        const isPublic = book.visibility === 'public';
+        const isOwner = !book.sharedBy || book.sharedBy === syncKey || book.sharedBy === "Anonyme";
 
         const item = document.createElement('div');
         item.className = `lib-item ${book.id === foundBook.id ? 'active' : ''}`;
         item.innerHTML = `
             <div class="lib-info">
                 <span class="lib-title">${escapeHtml(book.title)}</span>
-                <span class="lib-sub">${readCount}/${total} lus (${pct}%)</span>
+                <span class="lib-sub">
+                    <span class="vis-pill ${isPublic ? 'pub' : 'priv'}">${isPublic ? 'Public' : 'Privé'}</span>
+                    <span>${readCount}/${total} lus (${pct}%)</span>
+                </span>
             </div>
-            <button class="lib-del-btn" title="Supprimer ce livre">SUPPR.</button>
+            <div class="lib-actions">
+                ${!isPublic ? `<button class="lib-del-btn btn-toggle-vis" title="Rendre public">Passer public</button>` : ""}
+                ${(isPublic && isOwner) ? `<button class="lib-del-btn btn-toggle-vis" title="Garder uniquement en local">Passer privé</button>` : ""}
+                <button class="lib-del-btn btn-del-book" title="Supprimer">Suppr.</button>
+            </div>
         `;
 
         item.querySelector('.lib-info').onclick = async () => {
@@ -391,10 +497,48 @@ async function refreshLibraryUI(selectedBookId = null) {
             await refreshLibraryUI(book.id);
         };
 
-        item.querySelector('.lib-del-btn').onclick = async (e) => {
+        const visBtn = item.querySelector('.btn-toggle-vis');
+        if (visBtn) {
+            visBtn.onclick = async (e) => {
+                e.stopPropagation();
+                if (!isPublic) {
+                    if (confirm(`Publier "${book.title}" dans la bibliothèque commune ?`)) {
+                        visBtn.disabled = true;
+                        visBtn.innerText = "Envoi...";
+                        book.visibility = 'public';
+                        book.sharedBy = syncKey || "Anonyme";
+                        const ok = await publishBookToPublicLibrary(book);
+                        if (ok) {
+                            await dbSaveBook(book);
+                        } else {
+                            book.visibility = 'private';
+                        }
+                        await refreshLibraryUI(book.id);
+                    }
+                } else {
+                    if (confirm(`Passer "${book.title}" en mode Privé (il sera retiré de la bibliothèque commune) ?`)) {
+                        visBtn.disabled = true;
+                        visBtn.innerText = "Retrait...";
+                        await deletePublicBookFromFirebase(book);
+                        book.visibility = 'private';
+                        await dbSaveBook(book);
+                        await refreshLibraryUI(book.id);
+                    }
+                }
+            };
+        }
+
+        item.querySelector('.btn-del-book').onclick = async (e) => {
             e.stopPropagation();
-            if (confirm(`Supprimer "${book.title}" de votre bibliothèque locale ?`)) {
+            const msg = (isPublic && isOwner)
+                ? `Supprimer "${book.title}" de votre bibliothèque et de la bibliothèque commune ?`
+                : `Supprimer "${book.title}" de votre bibliothèque locale ?`;
+
+            if (confirm(msg)) {
                 await dbDeleteBook(book.id);
+                if (isPublic && isOwner) {
+                    await deletePublicBookFromFirebase(book);
+                }
                 await refreshLibraryUI();
             }
         };
@@ -413,10 +557,9 @@ function loadActiveBookIntoUI(book) {
     const pct = total > 0 ? Math.round((readCount / total) * 100) : 0;
 
     $('book-title-label').innerText = book.title;
-    $('book-progress-text').innerText = `${readCount}/${total} LUS (${pct}%)`;
+    $('book-progress-text').innerText = `${readCount}/${total} (${pct}%)`;
     $('book-progress-bar-fill').style.width = `${pct}%`;
 
-    // Sélectionner par défaut le dernier chapitre utilisé, ou le premier non lu
     let defaultIdx = book.lastIndex || 0;
     if (defaultIdx >= total) defaultIdx = 0;
 
@@ -424,15 +567,16 @@ function loadActiveBookIntoUI(book) {
     select.innerHTML = '';
     book.chapters.forEach((chap, idx) => {
         const isRead = readSet.has(chap.id);
-        const statusTag = isRead ? "[✓ LU] " : "[À LIRE] ";
+        const isPaused = book.pausedPositions && book.pausedPositions[chap.id] > 0;
+        const statusTag = isRead ? "✓ " : (isPaused ? "⏸ " : "");
+        const qCount = calculateQuestionCount(chap.wordCount || 0);
         const opt = document.createElement('option');
         opt.value = idx;
-        opt.textContent = `${statusTag}${chap.label} (${chap.wordCount} mots)`;
+        opt.textContent = `${statusTag}${chap.label} · ${chap.wordCount} mots (${qCount} Q)`;
         select.appendChild(opt);
     });
 
     $('chapter-selector-box').style.display = 'block';
-    $('preview-box').style.display = 'block';
     $('start-btn').disabled = false;
 
     selectChapter(defaultIdx);
@@ -445,31 +589,128 @@ async function selectChapter(index) {
     if (!chap) return;
 
     $('chapter-select').value = currentChapterIndex;
-    $('custom-text').value = chap.text;
-    activeChapterLabel = chap.label.toUpperCase();
+    activeChapterLabel = chap.label;
 
     const isAlreadyRead = (activeBook.readChapters || []).includes(chap.id);
-    $('start-btn').innerText = isAlreadyRead ? "Relire ce chapitre" : "Commencer la lecture";
+    const isPaused = activeBook.pausedPositions && activeBook.pausedPositions[chap.id] > 0;
+
+    if (isPaused) {
+        $('start-btn').innerText = "Reprendre la lecture";
+    } else if (isAlreadyRead) {
+        $('start-btn').innerText = "Relire ce chapitre";
+    } else {
+        $('start-btn').innerText = "Commencer la lecture";
+    }
 
     activeBook.lastIndex = currentChapterIndex;
     await dbSaveBook(activeBook);
 }
 
 // ==========================================
-// 4. GÉNÉRATION DU QUIZ IA (GEMINI) & LECTURE
+// 7. BIBLIOTHÈQUE COMMUNE (LIVRES PUBLICS)
 // ==========================================
 
-async function initGame() {
-    if (!activeBook) {
-        alert("Veuillez d'abord importer un livre EPUB ou TXT.");
+async function ouvrirBibliothequeCommune() {
+    $('community-overlay').classList.remove('hidden');
+    const listEl = $('community-list');
+    listEl.innerHTML = '<div class="lb-row">Chargement des livres partagés...</div>';
+
+    try {
+        const [res, localBooks] = await Promise.all([
+            fetch(`${FIREBASE_DB_URL}/focus_read_public_books.json`),
+            dbGetAllBooks()
+        ]);
+
+        if (!res.ok) throw new Error("Impossible d'accéder à la bibliothèque commune");
+
+        const data = await res.json();
+        if (!data) {
+            listEl.innerHTML = '<div class="lb-row">Aucun livre partagé pour le moment.</div>';
+            return;
+        }
+
+        const localIds = new Set(localBooks.flatMap(b => [b.id, b.publicId].filter(Boolean)));
+        const publicBooks = Object.values(data).sort((a, b) => (b.publishedAt || 0) - (a.publishedAt || 0));
+
+        listEl.innerHTML = '';
+        publicBooks.forEach(pubBook => {
+            const alreadyInLib = localIds.has(pubBook.id) || (pubBook.localId && localIds.has(pubBook.localId));
+            const row = document.createElement('div');
+            row.className = 'lb-row';
+            row.innerHTML = `
+                <div class="lb-rank-name">
+                    <span class="lb-name">${escapeHtml(pubBook.title)}</span>
+                    <span class="lb-meta">Par ${escapeHtml(pubBook.sharedBy || "Anonyme")} · ${pubBook.chapterCount || "?"} chapitres</span>
+                </div>
+                <button class="pill-btn btn-add-pub" ${alreadyInLib ? "disabled" : ""}>
+                    ${alreadyInLib ? "Ajouté ✓" : "+ Ajouter"}
+                </button>
+            `;
+
+            const addBtn = row.querySelector('.btn-add-pub');
+            if (!alreadyInLib) {
+                addBtn.onclick = async () => {
+                    addBtn.disabled = true;
+                    addBtn.innerText = "Ajout...";
+                    await telechargerLivrePublic(pubBook);
+                    addBtn.innerText = "Ajouté ✓";
+                };
+            }
+
+            listEl.appendChild(row);
+        });
+    } catch (e) {
+        listEl.innerHTML = `<div class="lb-row">Erreur : ${e.message}</div>`;
+    }
+}
+
+async function telechargerLivrePublic(pubBook) {
+    const rawList = Array.isArray(pubBook?.chapters)
+        ? pubBook.chapters.filter(Boolean)
+        : Object.values(pubBook?.chapters || pubBook?.rawChapters || {});
+
+    if (!pubBook || rawList.length === 0) {
+        alert("Ce livre est vide ou corrompu.");
         return;
     }
 
-    const inputKey = $('api-key').value.trim();
-    saveGeminiKey(inputKey);
-    const apiKey = inputKey || DEFAULT_API_KEY;
-    const diffKey = $('difficulty').value || 'medium';
-    const btn = $('start-btn');
+    const formattedChapters = rawList.map((ch, idx) => ({
+        id: ch.id || `chap_${idx + 1}`,
+        chapterNum: ch.chapterNum || (idx + 1),
+        label: ch.label || `Chapitre ${idx + 1}${ch.title ? ` : ${ch.title}` : ''}`,
+        text: ch.text,
+        wordCount: ch.wordCount || ch.text.split(/\s+/).filter(Boolean).length
+    }));
+
+    const localBookId = pubBook.localId || pubBook.id;
+    const bookRecord = {
+        id: localBookId,
+        publicId: pubBook.id,
+        title: pubBook.title,
+        fileName: pubBook.fileName || `${pubBook.title}.epub`,
+        visibility: 'public',
+        sharedBy: pubBook.sharedBy || "Anonyme",
+        chapters: formattedChapters,
+        readChapters: [],
+        pausedPositions: {},
+        lastIndex: 0,
+        updatedAt: Date.now()
+    };
+
+    await dbSaveBook(bookRecord);
+    localStorage.setItem("focus_read_active_book_id", bookRecord.id);
+    await refreshLibraryUI(bookRecord.id);
+}
+
+// ==========================================
+// 8. LECTURE IMMÉDIATE, PAUSE & QUIZ À LA FIN
+// ==========================================
+
+function startReadingSession() {
+    if (!activeBook) {
+        alert("Veuillez d'abord importer ou ajouter un livre.");
+        return;
+    }
 
     const chap = activeBook.chapters[currentChapterIndex];
     if (!chap || !chap.text) {
@@ -477,33 +718,95 @@ async function initGame() {
         return;
     }
 
+    activeText = chap.text;
+    activeChapterLabel = chap.label;
+    const qCount = calculateQuestionCount(chap.wordCount || activeText.split(/\s+/).filter(Boolean).length);
+
+    $('setup-screen').style.display = 'none';
+    $('quiz-screen').style.display = 'none';
+    $('game-screen').style.display = 'flex';
+
+    $('hud-chapter-title').innerText = activeChapterLabel;
+    $('finish-reading-btn').innerText = `Terminer & Générer le quiz (${qCount} questions)`;
+
+    const track = $('text-track');
+    track.innerText = activeText;
+
+    const viewport = $('viewport');
+    const savedScroll = (activeBook.pausedPositions && activeBook.pausedPositions[chap.id]) || 0;
+    viewport.scrollTop = savedScroll;
+    updateScrollProgress();
+}
+
+async function pauseReadingSession() {
+    if (!activeBook) return;
+    const chap = activeBook.chapters[currentChapterIndex];
+    const viewport = $('viewport');
+
+    if (chap) {
+        if (!activeBook.pausedPositions) activeBook.pausedPositions = {};
+        activeBook.pausedPositions[chap.id] = viewport.scrollTop;
+        activeBook.updatedAt = Date.now();
+        await dbSaveBook(activeBook);
+    }
+
+    $('game-screen').style.display = 'none';
+    $('quiz-screen').style.display = 'none';
+    $('setup-screen').style.display = 'block';
+    await refreshLibraryUI(activeBook.id);
+}
+
+function updateScrollProgress() {
+    const viewport = $('viewport');
+    const maxScroll = viewport.scrollHeight - viewport.clientHeight;
+    if (maxScroll <= 0) {
+        $('scroll-percent').innerText = "100%";
+        return;
+    }
+    const percent = Math.min(100, Math.max(0, Math.round((viewport.scrollTop / maxScroll) * 100)));
+    $('scroll-percent').innerText = `${percent}%`;
+}
+
+async function finishChapterAndGenerateQuiz() {
+    const inputKey = $('api-key').value.trim();
+    saveGeminiKey(inputKey);
+    const apiKey = inputKey || DEFAULT_API_KEY;
+
+    const chap = activeBook?.chapters[currentChapterIndex];
+    const wordCount = chap?.wordCount || activeText.split(/\s+/).filter(Boolean).length;
+    const questionCount = calculateQuestionCount(wordCount);
+
     if (!apiKey) {
-        alert("Veuillez renseigner votre clé API Gemini pour générer les questions sur ce chapitre.");
+        alert("Veuillez renseigner votre clé API Gemini sur l'écran principal (votre lecture est mise en pause).");
+        await pauseReadingSession();
         return;
     }
 
-    btn.disabled = true;
-    btn.innerText = "GÉNÉRATION DU QUIZ EN COURS...";
+    const finishBtn = $('finish-reading-btn');
+    finishBtn.disabled = true;
+    finishBtn.innerText = `Génération de ${questionCount} questions...`;
 
     try {
-        activeText = chap.text;
-        generatedQuiz = await generateQuizFromText(apiKey, activeText, diffKey);
-        startReadingSession();
+        generatedQuiz = await generateQuizFromText(apiKey, activeText, questionCount);
+
+        if (activeBook && chap && activeBook.pausedPositions) {
+            delete activeBook.pausedPositions[chap.id];
+            await dbSaveBook(activeBook);
+        }
+
+        showQuizScreen();
     } catch (err) {
-        alert(err.message);
+        alert("Erreur lors de la génération du quiz : " + err.message);
     } finally {
-        btn.disabled = false;
-        const isAlreadyRead = (activeBook.readChapters || []).includes(chap.id);
-        btn.innerText = isAlreadyRead ? "Relire ce chapitre" : "Commencer la lecture";
+        finishBtn.disabled = false;
+        finishBtn.innerText = `Terminer & Générer le quiz (${questionCount} questions)`;
     }
 }
 
-async function generateQuizFromText(apiKey, text, diffKey) {
-    const diff = DIFFICULTY_CONFIG[diffKey];
-
-    const prompt = `Voici un passage de livre que l'utilisateur vient de lire :
+async function generateQuizFromText(apiKey, text, questionCount) {
+    const prompt = `Voici un chapitre de livre que l'utilisateur vient de terminer :
     "${text}"
-    ${diff.promptRule}
+    Pose exactement ${questionCount} questions de compréhension de difficulté classique (portant sur les événements, les personnages, les actions et les détails concrets répartis sur l'ensemble du chapitre), avec 3 choix de réponse chacune.
     Réponds UNIQUEMENT en JSON strict sans balises markdown :
     [
         {"question": "Question 1 ?", "options": ["Choix A", "Choix B", "Choix C"], "answer": 0}
@@ -525,42 +828,14 @@ async function generateQuizFromText(apiKey, text, diffKey) {
     return JSON.parse(raw);
 }
 
-function startReadingSession() {
-    $('setup-screen').style.display = 'none';
-    $('quiz-screen').style.display = 'none';
-    $('game-screen').style.display = 'flex';
-
-    $('hud-chapter-title').innerText = activeChapterLabel;
-    const track = $('text-track');
-    track.innerText = activeText;
-
-    const viewport = $('viewport');
-    viewport.scrollTop = 0;
-    updateScrollProgress();
-}
-
-function updateScrollProgress() {
-    const viewport = $('viewport');
-    const maxScroll = viewport.scrollHeight - viewport.clientHeight;
-    if (maxScroll <= 0) {
-        $('scroll-percent').innerText = "100%";
-        return;
-    }
-    const percent = Math.min(100, Math.max(0, Math.round((viewport.scrollTop / maxScroll) * 100)));
-    $('scroll-percent').innerText = `${percent}%`;
-}
-
 // ==========================================
-// 5. VALIDATION DU CHAPITRE ("LU" SI 100%) & SCORE
+// 9. VALIDATION DU CHAPITRE ("LU" SI 100%) & STREAK
 // ==========================================
 
 function showQuizScreen() {
-    const diffKey = $('difficulty').value || 'medium';
-    const diff = DIFFICULTY_CONFIG[diffKey];
-
     $('game-screen').style.display = 'none';
     $('quiz-screen').style.display = 'block';
-    $('quiz-title').innerText = `Interrogatoire — ${diff.label} (×${diff.multiplier})`;
+    $('quiz-title').innerText = `Vérification · ${generatedQuiz.length} questions`;
     $('submit-quiz-btn').style.display = 'block';
     $('retry-chapter-btn').style.display = 'none';
     $('next-chapter-btn').style.display = 'none';
@@ -620,35 +895,39 @@ async function evaluateQuiz() {
         if (chosen === q.answer) correctCount++;
     });
 
-    const diffKey = $('difficulty').value || 'medium';
-    const diff = DIFFICULTY_CONFIG[diffKey];
     const isPerfect = correctCount === generatedQuiz.length;
+    const pointsGagnes = (correctCount * 10) + (isPerfect ? 20 : 0);
 
-    const basePoints = (correctCount * 10) + (isPerfect ? 20 : 0);
-    const pointsGagnes = Math.round(basePoints * diff.multiplier);
+    userStats.scoreTotal = (userStats.scoreTotal || 0) + pointsGagnes;
+    userStats.quizzesCompleted = (userStats.quizzesCompleted || 0) + 1;
+    if (isPerfect) {
+        userStats.perfectScores = (userStats.perfectScores || 0) + 1;
+    }
 
-    userStats.scoreTotal += pointsGagnes;
-    userStats.quizzesCompleted += 1;
-    if (isPerfect) userStats.perfectScores += 1;
-
-    saveLocalStats();
-    await pushToCloud();
-
-    // Si 100% de réussite, marquer ce chapitre comme "LU" dans IndexedDB
     let validationStatusMsg = "";
     const chap = activeBook.chapters[currentChapterIndex];
 
     if (isPerfect && chap) {
         if (!activeBook.readChapters) activeBook.readChapters = [];
-        if (!activeBook.readChapters.includes(chap.id)) {
+        const isFirstTimeChapterValidated = !activeBook.readChapters.includes(chap.id);
+        if (isFirstTimeChapterValidated) {
             activeBook.readChapters.push(chap.id);
         }
+
+        recordValidatedChapterStats(isFirstTimeChapterValidated);
+
         activeBook.updatedAt = Date.now();
         await dbSaveBook(activeBook);
-        validationStatusMsg = `<span style="color:#fff;">✓ CHAPITRE VALIDÉ COMME LU</span>`;
+
+        const currentStreak = getEffectiveStreak(userStats);
+        validationStatusMsg = `<strong>Chapitre validé comme lu</strong> · Streak : ${currentStreak} j (${userStats.totalChaptersRead} lus)`;
     } else {
-        validationStatusMsg = `<span style="color:#aaa;">✗ NON VALIDÉ (100% requis pour marquer comme lu)</span>`;
+        validationStatusMsg = `Non validé · 100 % requis pour marquer le chapitre comme lu`;
     }
+
+    saveLocalStats();
+    renderGlobalStatsUI();
+    await pushToCloud();
 
     $('submit-quiz-btn').style.display = 'none';
     $('restart-btn').style.display = 'block';
@@ -667,8 +946,7 @@ async function evaluateQuiz() {
     finalMsg.className = 'result-box';
     finalMsg.innerHTML = `
         ${validationStatusMsg}<br>
-        SCORE : <strong>${correctCount} / ${generatedQuiz.length}</strong> (${diff.label} ×${diff.multiplier})<br>
-        POINTS GAGNÉS : <strong>+${pointsGagnes} PTS</strong> (Total : ${userStats.scoreTotal} pts)
+        Score : <strong>${correctCount} / ${generatedQuiz.length}</strong> · <strong>+${pointsGagnes} pts</strong> (Total : ${userStats.scoreTotal} pts)
     `;
     $('quiz-container').appendChild(finalMsg);
 }
@@ -676,20 +954,21 @@ async function evaluateQuiz() {
 async function launchNextChapter() {
     if (!activeBook || currentChapterIndex + 1 >= activeBook.chapters.length) return;
     await selectChapter(currentChapterIndex + 1);
-    await initGame();
+    startReadingSession();
 }
 
 async function resetToMenu() {
     $('game-screen').style.display = 'none';
     $('quiz-screen').style.display = 'none';
     $('setup-screen').style.display = 'block';
+    renderGlobalStatsUI();
     if (activeBook) {
         await refreshLibraryUI(activeBook.id);
     }
 }
 
 // ==========================================
-// 6. FIREBASE SYNC & CLASSEMENT PAR CLÉ
+// 10. FIREBASE SYNC & CLASSEMENT PAR CLÉ
 // ==========================================
 
 function saveLocalStats() {
@@ -707,17 +986,22 @@ async function hashPassword(str) {
 
 function updateSyncStatus(msg, isSuccess = false) {
     const el = $('syncStatus');
-    if (!el) return;
-    el.textContent = `SYNC : ${msg}`;
-    el.style.borderColor = isSuccess ? "#f5f5f5" : "#444";
-    el.style.color = isSuccess ? "#f5f5f5" : "#aaa";
+    const dot = $('syncDot');
+    if (el) {
+        el.textContent = `Sync : ${msg}`;
+        el.style.color = isSuccess ? "#f7f7f7" : "#888888";
+    }
+    if (dot) {
+        dot.classList.toggle('online', isSuccess);
+    }
 }
 
 function updateSyncKeyUI() {
-    const el = $('btnSyncKey');
-    if (!el) return;
-    const isLocked = Boolean(currentKeyPassword);
-    el.textContent = syncKey ? `${syncKey} ${isLocked ? "🔒" : ""}` : "CLÉ";
+    const labelEl = $('syncKeyLabel');
+    if (labelEl) {
+        const isLocked = Boolean(currentKeyPassword);
+        labelEl.textContent = syncKey ? `${syncKey}${isLocked ? " · 🔒" : ""}` : "Définir un compte";
+    }
     if ($('current-lb-key')) {
         $('current-lb-key').textContent = syncKey || "Non définie";
     }
@@ -725,10 +1009,6 @@ function updateSyncKeyUI() {
 
 function genererNouvelleCle() {
     return "READ-" + Math.random().toString(36).substring(2, 8).toUpperCase();
-}
-
-function sanitizeFirebaseKey(rawKey) {
-    return rawKey.replace(/[.#$\[\]/]/g, '_').trim();
 }
 
 async function changerOuCopierCle() {
@@ -764,8 +1044,16 @@ async function changerOuCopierCle() {
     let rawNouvelleCle = (saisie === "1") ? (prompt("Entrez le nom de votre clé :") || "") : saisie;
     let nouvelleCle = sanitizeFirebaseKey(rawNouvelleCle);
 
-    userStats = { scoreTotal: 0, quizzesCompleted: 0, perfectScores: 0 };
+    userStats = {
+        scoreTotal: 0,
+        quizzesCompleted: 0,
+        perfectScores: 0,
+        totalChaptersRead: 0,
+        streakDays: 0,
+        lastReadDate: null
+    };
     saveLocalStats();
+    renderGlobalStatsUI();
 
     if (!nouvelleCle) {
         syncKey = genererNouvelleCle();
@@ -787,7 +1075,7 @@ async function changerOuCopierCle() {
 
 async function pullFromCloud() {
     if (!navigator.onLine) {
-        updateSyncStatus("HORS LIGNE");
+        updateSyncStatus("Hors ligne", false);
         return;
     }
 
@@ -799,7 +1087,7 @@ async function pullFromCloud() {
         return;
     }
 
-    updateSyncStatus("CHARGEMENT...");
+    updateSyncStatus("Chargement...", false);
     try {
         const res = await fetch(`${FIREBASE_DB_URL}/focus_read_users/${encodeURIComponent(syncKey)}.json`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -817,7 +1105,7 @@ async function pullFromCloud() {
             while (hashLocal !== payload.passwordHash && tentatives < 3) {
                 const saisie = prompt(`La clé "${syncKey}" est protégée par un mot de passe :`);
                 if (saisie === null) {
-                    updateSyncStatus("ACCÈS REFUSÉ");
+                    updateSyncStatus("Accès refusé", false);
                     return;
                 }
                 currentKeyPassword = saisie.trim();
@@ -826,7 +1114,7 @@ async function pullFromCloud() {
             }
 
             if (hashLocal !== payload.passwordHash) {
-                updateSyncStatus("MDP INCORRECT");
+                updateSyncStatus("Mot de passe incorrect", false);
                 return;
             }
 
@@ -834,17 +1122,34 @@ async function pullFromCloud() {
             updateSyncKeyUI();
         }
 
+        const cloudLastDate = payload.lastReadDate || null;
+        const localLastDate = userStats.lastReadDate || null;
+        const mostRecentDate = (!localLastDate || (cloudLastDate && cloudLastDate > localLastDate))
+            ? cloudLastDate
+            : localLastDate;
+
+        const bestStreak = mostRecentDate === cloudLastDate
+            ? Math.max(payload.streakDays || 0, (localLastDate === cloudLastDate ? userStats.streakDays || 0 : 0))
+            : (userStats.streakDays || 0);
+
         userStats = {
             scoreTotal: Math.max(userStats.scoreTotal || 0, payload.scoreTotal || 0),
             quizzesCompleted: Math.max(userStats.quizzesCompleted || 0, payload.quizzesCompleted || 0),
-            perfectScores: Math.max(userStats.perfectScores || 0, payload.perfectScores || 0)
+            perfectScores: Math.max(userStats.perfectScores || 0, payload.perfectScores || 0),
+            totalChaptersRead: Math.max(
+                userStats.totalChaptersRead || 0,
+                payload.totalChaptersRead || payload.perfectScores || 0
+            ),
+            streakDays: bestStreak,
+            lastReadDate: mostRecentDate
         };
 
         saveLocalStats();
-        updateSyncStatus("À JOUR", true);
+        renderGlobalStatsUI();
+        updateSyncStatus("À jour", true);
     } catch (e) {
         console.error("Erreur lecture Firebase:", e);
-        updateSyncStatus("ERREUR LECTURE");
+        updateSyncStatus("Erreur lecture", false);
     }
 }
 
@@ -857,7 +1162,7 @@ async function pushToCloud() {
         updateSyncKeyUI();
     }
 
-    updateSyncStatus("ENVOI...");
+    updateSyncStatus("Envoi...", false);
     try {
         const checkRes = await fetch(`${FIREBASE_DB_URL}/focus_read_users/${encodeURIComponent(syncKey)}/passwordHash.json`);
         if (checkRes.ok) {
@@ -865,7 +1170,7 @@ async function pushToCloud() {
             if (distantHash) {
                 const localHash = await hashPassword(currentKeyPassword);
                 if (distantHash !== localHash) {
-                    updateSyncStatus("ÉCRITURE REFUSÉE");
+                    updateSyncStatus("Écriture refusée", false);
                     return;
                 }
             }
@@ -874,6 +1179,7 @@ async function pushToCloud() {
         const hash = await hashPassword(currentKeyPassword);
         const payload = {
             ...userStats,
+            streakDays: getEffectiveStreak(userStats),
             passwordHash: hash || null,
             updatedAt: Date.now()
         };
@@ -885,10 +1191,10 @@ async function pushToCloud() {
         });
 
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        updateSyncStatus("SYNCHRONISÉ", true);
+        updateSyncStatus("Synchronisé", true);
     } catch (e) {
         console.error("Erreur écriture Firebase:", e);
-        updateSyncStatus("ERREUR ENVOI");
+        updateSyncStatus("Erreur envoi", false);
     }
 }
 
@@ -904,7 +1210,7 @@ async function ouvrirClassement() {
 
         const data = await res.json();
         if (!data) {
-            listEl.innerHTML = '<div class="lb-row">Aucun joueur classé pour le moment.</div>';
+            listEl.innerHTML = '<div class="lb-row">Aucun lecteur classé pour le moment.</div>';
             return;
         }
 
@@ -912,22 +1218,22 @@ async function ouvrirClassement() {
             .map(([key, val]) => ({
                 key,
                 scoreTotal: val.scoreTotal || 0,
-                quizzesCompleted: val.quizzesCompleted || 0,
-                perfectScores: val.perfectScores || 0
+                chaptersRead: val.totalChaptersRead || val.perfectScores || 0,
+                streakDays: getEffectiveStreak(val)
             }))
             .sort((a, b) => b.scoreTotal - a.scoreTotal)
             .slice(0, 30);
 
         listEl.innerHTML = players.map((p, index) => {
             const isMe = p.key === syncKey;
-            const medal = index === 0 ? "🥇 " : index === 1 ? "🥈 " : index === 2 ? "🥉 " : `#${index + 1} `;
+            const rank = `#${index + 1} `;
             return `
                 <div class="lb-row ${isMe ? 'me' : ''}">
                     <div class="lb-rank-name">
-                        <span class="lb-name">${medal}${escapeHtml(p.key)} ${isMe ? "(Vous)" : ""}</span>
-                        <span class="lb-meta">${p.perfectScores} chapitres validés · ${p.quizzesCompleted} tentatives</span>
+                        <span class="lb-name">${rank}${escapeHtml(p.key)} ${isMe ? "(Vous)" : ""}</span>
+                        <span class="lb-meta">Streak ${p.streakDays} j · ${p.chaptersRead} chapitres lus</span>
                     </div>
-                    <span class="lb-score">${p.scoreTotal} PTS</span>
+                    <span class="lb-score">${p.scoreTotal} pts</span>
                 </div>
             `;
         }).join('');
@@ -943,37 +1249,29 @@ function escapeHtml(str) {
 }
 
 // ==========================================
-// 7. ÉVÉNEMENTS & INITIALISATION PWA
+// 11. ÉVÉNEMENTS & INITIALISATION PWA
 // ==========================================
 
 $('api-key').addEventListener('input', e => saveGeminiKey(e.target.value));
-$('difficulty').addEventListener('change', e => localStorage.setItem("focus_read_difficulty", e.target.value));
-
-// Si on change la taille des segments, re-découper le livre actif proprement
-$('text-length').addEventListener('change', async e => {
-    localStorage.setItem("focus_read_length", e.target.value);
-    if (activeBook && activeBook.rawChapters) {
-        activeBook.chapters = buildSegmentsFromRawChapters(activeBook.rawChapters);
-        activeBook.lastIndex = 0;
-        await dbSaveBook(activeBook);
-        await refreshLibraryUI(activeBook.id);
-    }
-});
 
 $('file-drop-zone').addEventListener('click', () => $('file-input').click());
 $('file-input').addEventListener('change', handleFileUpload);
 $('chapter-select').addEventListener('change', e => selectChapter(e.target.value));
 
-$('start-btn').addEventListener('click', initGame);
+$('start-btn').addEventListener('click', startReadingSession);
+$('pause-reading-btn').addEventListener('click', pauseReadingSession);
 $('viewport').addEventListener('scroll', updateScrollProgress);
-$('finish-reading-btn').addEventListener('click', showQuizScreen);
+$('finish-reading-btn').addEventListener('click', finishChapterAndGenerateQuiz);
+
 $('submit-quiz-btn').addEventListener('click', evaluateQuiz);
 $('retry-chapter-btn').addEventListener('click', startReadingSession);
 $('next-chapter-btn').addEventListener('click', launchNextChapter);
 $('restart-btn').addEventListener('click', resetToMenu);
 
-// Firebase & Classement events
+// Firebase, Communauté & Classement events
 $('btnSyncKey').addEventListener('click', changerOuCopierCle);
+$('btnCommunity').addEventListener('click', ouvrirBibliothequeCommune);
+$('btnCloseCommunity').addEventListener('click', () => $('community-overlay').classList.add('hidden'));
 $('btnLeaderboard').addEventListener('click', ouvrirClassement);
 $('btnCloseLeaderboard').addEventListener('click', () => $('leaderboard-overlay').classList.add('hidden'));
 
@@ -988,6 +1286,7 @@ if ('serviceWorker' in navigator) {
 (async () => {
     loadLocalPreferences();
     updateSyncKeyUI();
+    renderGlobalStatsUI();
     await refreshLibraryUI();
     pullFromCloud();
 })();
