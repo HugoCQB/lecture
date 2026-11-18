@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>FOCUS // READ & QUIZ</title>
+    
+    <!-- PWA -->
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#0a0a0a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+
+    <!-- JSZip pour extraire le texte des fichiers EPUB -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <!-- 1. CONFIGURATION & CLASSEMENT -->
+    <div class="panel" id="setup-screen">
+        <div class="top-bar">
+            <button class="mini-btn" id="btnSyncKey">CLÉ</button>
+            <span id="syncStatus" class="sync-badge">SYNC : LOCAL</span>
+            <button class="mini-btn" id="btnLeaderboard">CLASSEMENT</button>
+        </div>
+
+        <h1>Focus // Read</h1>
+
+        <div class="field">
+            <label for="api-key">Clé API Gemini (Optionnelle si définie dans config.js)</label>
+            <input type="password" id="api-key" placeholder="AIzaSy... (laisser vide pour mode démo)">
+        </div>
+
+        <div class="tabs">
+            <button class="tab-btn active" id="tab-ai">Générer par IA</button>
+            <button class="tab-btn" id="tab-file">Importer EPUB / TXT</button>
+        </div>
+
+        <!-- MODE IA -->
+        <div id="mode-ai">
+            <div class="field">
+                <label for="theme">Sujet du texte à lire</label>
+                <input type="text" id="theme" value="Le journal d'un gardien de phare isolé">
+            </div>
+        </div>
+
+        <!-- MODE IMPORT EPUB / TXT -->
+        <div id="mode-file" style="display:none;">
+            <div class="field">
+                <label>Fichier (.epub ou .txt)</label>
+                <div class="file-drop" id="file-drop-zone">
+                    <span id="file-label">Cliquez pour choisir un fichier EPUB ou TXT</span>
+                    <input type="file" id="file-input" accept=".epub,.txt" style="display:none">
+                </div>
+            </div>
+            <div class="field" id="preview-box" style="display:none;">
+                <label>Extrait converti (modifiable - ~350 mots max conseillés)</label>
+                <textarea id="custom-text" rows="5"></textarea>
+            </div>
+        </div>
+
+        <button class="action-btn" id="start-btn">Commencer la lecture</button>
+    </div>
+
+    <!-- 2. ZONE DE LECTURE LIBRE -->
+    <div id="game-screen">
+        <div class="hud">
+            <span>LECTURE LIBRE — NE QUITTEZ PAS L'ÉCRAN</span>
+            <span id="scroll-percent">0%</span>
+        </div>
+
+        <div class="scroll-viewport" id="viewport">
+            <div id="text-track"></div>
+            <div class="end-reading-box">
+                <p>Vous avez atteint la fin du passage.</p>
+                <button class="action-btn" id="finish-reading-btn">J'ai fini de lire → Passer au quiz</button>
+            </div>
+        </div>
+
+        <div class="footer-note">
+            SCROLLEZ À VOTRE RYTHME · LE TEXTE DISPARAÎTRA AU QUIZ
+        </div>
+    </div>
+
+    <!-- 3. INTERROGATOIRE IA DE FIN -->
+    <div class="panel" id="quiz-screen">
+        <h2>Interrogatoire de fin</h2>
+        <p class="subtitle">
+            Le texte a disparu. Répondez aux questions suivantes sur ce que vous venez de lire :
+        </p>
+        <div id="quiz-container"></div>
+        <button class="action-btn" id="submit-quiz-btn">Valider mes réponses</button>
+        <button class="action-btn" id="restart-btn" style="display:none; margin-top: 1rem;">Nouvelle lecture</button>
+    </div>
+
+    <!-- 4. MODALE CLASSEMENT FIREBASE -->
+    <div class="overlay hidden" id="leaderboard-overlay">
+        <div class="panel modal-panel">
+            <div class="modal-header">
+                <h2>Classement Global</h2>
+                <button class="mini-btn" id="btnCloseLeaderboard">FERMER [X]</button>
+            </div>
+            <div class="field">
+                <label for="pseudo-input">Votre Pseudo (Classement)</label>
+                <div class="pseudo-row">
+                    <input type="text" id="pseudo-input" maxlength="16" placeholder="Ex: Lecteur_01">
+                    <button class="mini-btn" id="btnSavePseudo">OK</button>
+                </div>
+            </div>
+            <div id="leaderboard-list" class="leaderboard-list">
+                Chargement...
+            </div>
+        </div>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

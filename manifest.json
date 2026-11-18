@@ -1,0 +1,20 @@
+{
+  "name": "FOCUS // READ & QUIZ",
+  "short_name": "FocusRead",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0a0a0a",
+  "theme_color": "#0a0a0a",
+  "icons": [
+    {
+      "src": "https://via.placeholder.com/192/0a0a0a/f5f5f5?text=FR",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "https://via.placeholder.com/512/0a0a0a/f5f5f5?text=FR",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}
