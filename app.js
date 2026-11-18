@@ -15,6 +15,7 @@ let currentChapterIndex = 0;
 let activeText = "";
 let generatedQuiz = [];
 let userAnswers = {};
+let isSaving = false;
 
 let syncKey = localStorage.getItem("focus_read_sync_key") || null;
 let currentKeyPassword = localStorage.getItem("focus_read_sync_pwd") || "";
@@ -120,8 +121,9 @@ async function saveBookCloud(book) {
         updateAccountUI();
     }
 
+    isSaving = true;
     book.id = cleanKey(book.id || `book_${Date.now()}`);
-    setSyncStatus("Sauvegarde...");
+    setSyncStatus("Sauvegarde du livre...");
 
     try {
         if (!await canWriteAccount()) {
@@ -169,10 +171,47 @@ async function saveBookCloud(book) {
     } catch (e) {
         setSyncStatus(`Erreur sync (${e.message})`);
         return false;
+    } finally {
+        isSaving = false;
+    }
+}
+
+async function saveBookProgress(book) {
+    if (!book || !syncKey) return false;
+    const idx = accountBooks.findIndex(b => b.id === book.id);
+    if (idx >= 0) accountBooks[idx] = { ...accountBooks[idx], ...book };
+
+    if (!navigator.onLine) {
+        setSyncStatus("Hors ligne (non sauvegardé)");
+        return false;
+    }
+
+    isSaving = true;
+    setSyncStatus("Sauvegarde progression...");
+    try {
+        if (!await canWriteAccount()) {
+            setSyncStatus("Accès refusé");
+            return false;
+        }
+        const base = `focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`;
+        await fb(base, "PATCH", {
+            readChapters: book.readChapters || [],
+            pausedPositions: book.pausedPositions || {},
+            lastIndex: book.lastIndex || 0,
+            updatedAt: Date.now()
+        });
+        setSyncStatus("Progression enregistrée ✓", true);
+        return true;
+    } catch (e) {
+        setSyncStatus(`Erreur sync (${e.message})`);
+        return false;
+    } finally {
+        isSaving = false;
     }
 }
 
 async function pullAccount(silent = false) {
+    if (isSaving) return;
     if (!navigator.onLine) return setSyncStatus("Hors ligne");
 
     if (!syncKey) {
@@ -188,6 +227,7 @@ async function pullAccount(silent = false) {
     if (!silent) setSyncStatus("Chargement...");
     try {
         const data = await fb(`focus_read_users/${encodeURIComponent(syncKey)}`);
+        if (isSaving) return;
         if (!data) {
             setSyncStatus("Nouveau profil", true);
             return pushStats();
@@ -227,7 +267,7 @@ async function pullAccount(silent = false) {
             .map(b => ({
                 ...b,
                 chapters: (Array.isArray(b.chapters) ? b.chapters : Object.values(b.chapters)).filter(c => c && c.text),
-                readChapters: b.readChapters || [],
+                readChapters: Array.isArray(b.readChapters) ? b.readChapters : Object.values(b.readChapters || {}),
                 pausedPositions: b.pausedPositions || {}
             }))
             .filter(b => b.chapters.length > 0);
@@ -241,6 +281,7 @@ async function pullAccount(silent = false) {
 
 async function pushStats() {
     if (!navigator.onLine || !syncKey) return;
+    isSaving = true;
     try {
         if (!await canWriteAccount()) return setSyncStatus("Écriture refusée");
         await fb(`focus_read_users/${encodeURIComponent(syncKey)}`, "PATCH", {
@@ -252,6 +293,8 @@ async function pushStats() {
         setSyncStatus("Synchronisé", true);
     } catch (e) {
         setSyncStatus(`Erreur envoi (${e.message})`);
+    } finally {
+        isSaving = false;
     }
 }
 
@@ -493,7 +536,7 @@ async function selectChapter(idx, save = true) {
     if (save && activeBook.lastIndex !== currentChapterIndex) {
         activeBook.lastIndex = currentChapterIndex;
         activeBook.updatedAt = Date.now();
-        await saveBookCloud(activeBook);
+        await saveBookProgress(activeBook);
     }
 }
 
@@ -528,7 +571,7 @@ async function pauseReading() {
         activeBook.pausedPositions = { ...(activeBook.pausedPositions || {}), [chap.id]: Math.round(window.scrollY) };
         activeBook.lastIndex = currentChapterIndex;
         activeBook.updatedAt = Date.now();
-        await saveBookCloud(activeBook);
+        await saveBookProgress(activeBook);
     }
     if (btn) btn.disabled = false;
     showView('setup-screen');
@@ -549,11 +592,11 @@ function prepareTextForQuiz(text, maxChars = 28000) {
 }
 
 async function callGeminiQuiz(apiKey, text, qCount) {
-    const models = ["gemini-2.5-flash", "gemini-2.0-flash"];
+    const models = ["gemini-2.5-flash", "gemini-3.8-flash"];
     const excerpt = prepareTextForQuiz(text);
     const prompt = `Tu es un professeur exigeant. À partir du texte suivant, génère exactement ${qCount} questions QCM de compréhension à 3 choix (index 0, 1 ou 2) couvrant l'ensemble du passage.\nFormat JSON attendu : [{"question":"...","options":["Choix 1","Choix 2","Choix 3"],"answer":0,"explanation":"Explication courte"}]\n\nTexte :\n"""\n${excerpt}\n"""`;
 
-    let lastError = null;
+    const errors = [];
     for (const model of models) {
         try {
             const res = await fetchWithTimeout(
@@ -589,10 +632,10 @@ async function callGeminiQuiz(apiKey, text, qCount) {
             if (!valid.length) throw new Error("Aucune question valide générée.");
             return valid;
         } catch (err) {
-            lastError = err;
+            errors.push(`${model} : ${err.message}`);
         }
     }
-    throw lastError || new Error("Impossible de générer le quiz.");
+    throw new Error(errors.join(" | ") || "Impossible de générer le quiz.");
 }
 
 async function finishAndQuiz() {
@@ -601,7 +644,7 @@ async function finishAndQuiz() {
     if (isChapterValidated(activeBook, chap)) {
         if (activeBook?.pausedPositions?.[chap.id]) {
             delete activeBook.pausedPositions[chap.id];
-            await saveBookCloud(activeBook);
+            await saveBookProgress(activeBook);
         }
         showView('setup-screen');
         renderLibrary(activeBook?.id);
@@ -628,7 +671,7 @@ async function finishAndQuiz() {
 
         if (activeBook?.pausedPositions?.[chap?.id]) {
             delete activeBook.pausedPositions[chap.id];
-            await saveBookCloud(activeBook);
+            await saveBookProgress(activeBook);
         }
         renderQuiz();
     } catch (e) {
@@ -706,13 +749,15 @@ async function evaluateQuiz() {
         userStats.quizzesCompleted += 1;
         if (perfect) {
             userStats.perfectScores += 1;
-            activeBook.readChapters = [...(activeBook.readChapters || []), chap.id];
+            const currentRead = new Set(activeBook.readChapters || []);
+            currentRead.add(chap.id);
+            activeBook.readChapters = [...currentRead];
             userStats.totalChaptersRead += 1;
             if (userStats.lastReadDate === dateKey(-1)) userStats.streakDays = (userStats.streakDays || 0) + 1;
             else if (userStats.lastReadDate !== dateKey(0)) userStats.streakDays = 1;
             userStats.lastReadDate = dateKey(0);
             activeBook.updatedAt = Date.now();
-            await saveBookCloud(activeBook);
+            await saveBookProgress(activeBook);
         }
         renderStats();
         await pushStats();

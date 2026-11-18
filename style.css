@@ -230,19 +230,24 @@ input::placeholder { color: #ffffff; }
 .stack { display: flex; flex-direction: column; gap: 0.6rem; }
 
 /* LECTURE & TAILLE DU TEXTE */
-.read-wrap { max-width: 62ch; margin: 0 auto; }
+.read-wrap {
+    max-width: 62ch;
+    margin: 0 auto;
+    padding-top: calc(4.2rem + env(safe-area-inset-top, 0px));
+}
 .read-bar {
-    position: sticky;
+    position: fixed;
     top: 0;
+    left: 0;
+    right: 0;
     background: #000000;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
-    padding: calc(0.65rem + env(safe-area-inset-top, 0px)) 0 0.65rem;
+    padding: calc(0.65rem + env(safe-area-inset-top, 0px)) max(1rem, calc((100vw - 62ch) / 2)) 0.65rem;
     border-bottom: 1.5px solid #ffffff;
-    margin-bottom: 1.5rem;
-    z-index: 10;
+    z-index: 20;
 }
 #hud-chapter-title { font-size: 0.84rem; font-weight: 600; color: #ffffff; flex: 1; text-align: center; }
 
