@@ -110,7 +110,10 @@ async function canWriteAccount() {
 }
 
 async function saveBookCloud(book) {
-    if (!navigator.onLine) return false;
+    if (!navigator.onLine) {
+        setSyncStatus("Hors ligne (non sauvegardé)");
+        return false;
+    }
     if (!syncKey) {
         syncKey = "READ-" + Math.random().toString(36).substring(2, 8).toUpperCase();
         localStorage.setItem("focus_read_sync_key", syncKey);
@@ -169,10 +172,11 @@ async function saveBookCloud(book) {
     }
 }
 
-async function pullAccount() {
+async function pullAccount(silent = false) {
     if (!navigator.onLine) return setSyncStatus("Hors ligne");
 
     if (!syncKey) {
+        if (silent) return;
         const input = prompt("Entrez votre identifiant de compte (ou vide pour en créer un) :");
         const cleaned = input ? cleanKey(input) : "";
         syncKey = cleaned || ("READ-" + Math.random().toString(36).substring(2, 8).toUpperCase());
@@ -181,7 +185,7 @@ async function pullAccount() {
         if (!cleaned) return pushStats();
     }
 
-    setSyncStatus("Chargement...");
+    if (!silent) setSyncStatus("Chargement...");
     try {
         const data = await fb(`focus_read_users/${encodeURIComponent(syncKey)}`);
         if (!data) {
@@ -228,10 +232,10 @@ async function pullAccount() {
             }))
             .filter(b => b.chapters.length > 0);
 
-        renderLibrary();
+        if (!$('setup-screen').hidden) renderLibrary(activeBook?.id);
         setSyncStatus(`À jour · ${accountBooks.length} livre${accountBooks.length > 1 ? 's' : ''}`, true);
     } catch (e) {
-        setSyncStatus(`Erreur réseau (${e.message})`);
+        if (!silent) setSyncStatus(`Erreur réseau (${e.message})`);
     }
 }
 
@@ -488,7 +492,8 @@ async function selectChapter(idx, save = true) {
 
     if (save && activeBook.lastIndex !== currentChapterIndex) {
         activeBook.lastIndex = currentChapterIndex;
-        saveBookCloud(activeBook);
+        activeBook.updatedAt = Date.now();
+        await saveBookCloud(activeBook);
     }
 }
 
@@ -516,11 +521,16 @@ function startReading() {
 
 async function pauseReading() {
     const chap = activeBook?.chapters[currentChapterIndex];
+    const btn = $('pause-reading-btn');
+    if (btn) btn.disabled = true;
+
     if (chap) {
-        activeBook.pausedPositions = { ...(activeBook.pausedPositions || {}), [chap.id]: window.scrollY };
+        activeBook.pausedPositions = { ...(activeBook.pausedPositions || {}), [chap.id]: Math.round(window.scrollY) };
+        activeBook.lastIndex = currentChapterIndex;
         activeBook.updatedAt = Date.now();
-        saveBookCloud(activeBook);
+        await saveBookCloud(activeBook);
     }
+    if (btn) btn.disabled = false;
     showView('setup-screen');
     renderLibrary(activeBook?.id);
 }
@@ -588,11 +598,10 @@ async function callGeminiQuiz(apiKey, text, qCount) {
 async function finishAndQuiz() {
     const chap = activeBook?.chapters[currentChapterIndex];
 
-    // Verrou : interdit de refaire le quiz d'un chapitre déjà validé
     if (isChapterValidated(activeBook, chap)) {
         if (activeBook?.pausedPositions?.[chap.id]) {
             delete activeBook.pausedPositions[chap.id];
-            saveBookCloud(activeBook);
+            await saveBookCloud(activeBook);
         }
         showView('setup-screen');
         renderLibrary(activeBook?.id);
@@ -619,7 +628,7 @@ async function finishAndQuiz() {
 
         if (activeBook?.pausedPositions?.[chap?.id]) {
             delete activeBook.pausedPositions[chap.id];
-            saveBookCloud(activeBook);
+            await saveBookCloud(activeBook);
         }
         renderQuiz();
     } catch (e) {
@@ -702,6 +711,7 @@ async function evaluateQuiz() {
             if (userStats.lastReadDate === dateKey(-1)) userStats.streakDays = (userStats.streakDays || 0) + 1;
             else if (userStats.lastReadDate !== dateKey(0)) userStats.streakDays = 1;
             userStats.lastReadDate = dateKey(0);
+            activeBook.updatedAt = Date.now();
             await saveBookCloud(activeBook);
         }
         renderStats();
@@ -841,6 +851,13 @@ document.querySelectorAll('[data-close]').forEach(btn => btn.onclick = () => {
     if (target) target.hidden = true;
 });
 document.querySelectorAll('.modal-bg').forEach(ov => ov.onclick = e => { if (e.target === ov) ov.hidden = true; });
+
+// Re-synchronise automatiquement depuis Firebase quand on revient sur l'appareil/onglet
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && syncKey && !$('setup-screen').hidden) {
+        pullAccount(true);
+    }
+});
 
 if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));

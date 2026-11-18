@@ -12,7 +12,7 @@
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 [hidden] { display: none !important; }
 
-body {
+html, body {
     margin: 0;
     background: #000000;
     color: var(--fg);
@@ -20,7 +20,11 @@ body {
     font-size: 15px;
     line-height: 1.55;
     -webkit-font-smoothing: antialiased;
-    padding: env(safe-area-inset-top, 1.25rem) 1.15rem calc(2rem + env(safe-area-inset-bottom, 0px));
+    overflow-x: hidden;
+}
+
+body {
+    padding: calc(1rem + env(safe-area-inset-top, 0px)) 1rem calc(2rem + env(safe-area-inset-bottom, 0px));
 }
 
 .wrap {
@@ -28,11 +32,11 @@ body {
     margin: 0 auto;
     display: flex;
     flex-direction: column;
-    gap: 1.4rem;
+    gap: 1.25rem;
 }
 
 h1, h2 { font-size: 1.05rem; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
-.label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 0.55rem; }
+.label { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 0.5rem; }
 .muted { color: var(--muted); }
 .small { font-size: 0.8rem; margin: 0; }
 .bold { font-weight: 700; }
@@ -43,10 +47,9 @@ h1, h2 { font-size: 1.05rem; font-weight: 700; margin: 0; letter-spacing: -0.01e
     display: flex;
     align-items: center;
     justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 0.65rem;
+    gap: 0.6rem;
 }
-.bar-links { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.bar-links { display: flex; gap: 0.45rem; }
 .small-gap { margin-bottom: 0.5rem; }
 
 .text-btn {
@@ -57,11 +60,12 @@ h1, h2 { font-size: 1.05rem; font-weight: 700; margin: 0; letter-spacing: -0.01e
     font: inherit;
     font-size: 0.84rem;
     font-weight: 700;
-    padding: 0.52rem 0.88rem;
-    min-height: 40px;
+    padding: 0.55rem 0.85rem;
+    min-height: 44px;
     cursor: pointer;
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 0.45rem;
     letter-spacing: -0.01em;
     transition: background 0.15s, color 0.15s, transform 0.1s;
@@ -72,20 +76,21 @@ h1, h2 { font-size: 1.05rem; font-weight: 700; margin: 0; letter-spacing: -0.01e
 }
 .text-btn:hover .muted { color: #000000; }
 .text-btn:hover .dot.online { background: #000000; box-shadow: none; }
-.text-btn:active { transform: scale(0.96); }
+.text-btn:active { transform: scale(0.97); }
+.text-btn:disabled { opacity: 0.4; cursor: wait; }
 
-.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
+.dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
 .dot.online { background: var(--fg); box-shadow: 0 0 8px rgba(255, 255, 255, 0.8); }
 
-.sub-status { margin: -0.9rem 0 0; font-size: 0.74rem; color: var(--muted); }
+.sub-status { margin: -0.85rem 0 0; font-size: 0.75rem; color: var(--muted); }
 
-/* BOUTONS PRINCIPAUX (FOND NOIR OU INVERSION TOTALE) */
+/* BOUTONS PRINCIPAUX */
 .btn-solid, .btn-outline {
     font: inherit;
-    font-size: 0.94rem;
+    font-size: 0.95rem;
     border-radius: var(--radius);
     padding: 0.85rem 1.1rem;
-    min-height: 50px;
+    min-height: 52px;
     cursor: pointer;
     letter-spacing: -0.01em;
     transition: background 0.15s, color 0.15s, border-color 0.15s, transform 0.1s;
@@ -127,7 +132,8 @@ h1, h2 { font-size: 1.05rem; font-weight: 700; margin: 0; letter-spacing: -0.01e
     color: var(--fg);
     border: 1px solid var(--border-strong);
     border-radius: 7px;
-    padding: 0.36rem 0.68rem;
+    padding: 0.4rem 0.7rem;
+    min-height: 36px;
     font-size: 0.78rem;
     font-weight: 700;
     cursor: pointer;
@@ -141,7 +147,7 @@ h1, h2 { font-size: 1.05rem; font-weight: 700; margin: 0; letter-spacing: -0.01e
 
 input, select {
     width: 100%;
-    min-height: 46px;
+    min-height: 48px;
     background: #000000;
     color: var(--fg);
     border: 1.5px solid var(--border);
@@ -164,7 +170,7 @@ input:focus, select:focus { border-color: var(--fg); }
     border-radius: var(--radius);
     text-align: center;
 }
-.metrics strong { display: block; font-size: 1.1rem; font-variant-numeric: tabular-nums; }
+.metrics strong { display: block; font-size: 1.15rem; font-variant-numeric: tabular-nums; }
 .metrics span { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
 
 /* LISTES */
@@ -196,12 +202,12 @@ input:focus, select:focus { border-color: var(--fg); }
     background: #000000;
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 0.75rem 0.9rem;
+    padding: 0.8rem 0.9rem;
 }
 .api-drawer summary {
     display: flex;
     justify-content: space-between;
-    font-size: 0.82rem;
+    font-size: 0.84rem;
     font-weight: 600;
     color: var(--fg);
     cursor: pointer;
@@ -221,24 +227,25 @@ input:focus, select:focus { border-color: var(--fg); }
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 1rem;
-    padding: 0.75rem 0;
+    gap: 0.75rem;
+    padding: calc(0.65rem + env(safe-area-inset-top, 0px)) 0 0.65rem;
     border-bottom: 1px solid var(--border);
-    margin-bottom: 1.75rem;
+    margin-bottom: 1.5rem;
     z-index: 10;
 }
-#hud-chapter-title { font-size: 0.85rem; font-weight: 500; color: var(--muted); }
+#hud-chapter-title { font-size: 0.84rem; font-weight: 500; color: var(--muted); flex: 1; text-align: center; }
 
 #text-track {
     font-family: var(--serif);
-    font-size: clamp(1.08rem, 2.5vw, 1.2rem);
+    font-size: clamp(1.06rem, 3.8vw, 1.2rem);
     line-height: 1.85;
     white-space: pre-line;
+    word-wrap: break-word;
 }
 
 .read-footer {
-    margin-top: 3rem;
-    padding-top: 1.5rem;
+    margin-top: 2.5rem;
+    padding-top: 1.25rem;
     border-top: 1px solid var(--border);
 }
 
@@ -250,8 +257,8 @@ input:focus, select:focus { border-color: var(--fg); }
     display: block;
     width: 100%;
     text-align: left;
-    padding: 0.85rem 1rem;
-    margin-bottom: 0.5rem;
+    padding: 0.9rem 1rem;
+    margin-bottom: 0.55rem;
     background: #000000;
     color: var(--fg);
     border: 1.5px solid var(--border);
@@ -285,7 +292,7 @@ input:focus, select:focus { border-color: var(--fg); }
 .modal-box {
     width: 100%;
     max-width: 480px;
-    max-height: 82dvh;
+    max-height: 85dvh;
     background: #000000;
     border: 1.5px solid var(--fg);
     border-radius: var(--radius);
@@ -294,12 +301,62 @@ input:focus, select:focus { border-color: var(--fg); }
     flex-direction: column;
     gap: 0.9rem;
 }
-.modal-scroll { overflow-y: auto; }
-.prose p { margin: 0 0 0.75rem; font-size: 0.86rem; color: #d6d6d6; }
+.modal-scroll { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.prose p { margin: 0 0 0.75rem; font-size: 0.88rem; color: #d6d6d6; }
 .prose code { background: #000000; border: 1px solid var(--border); padding: 0.1rem 0.35rem; border-radius: 4px; }
 
+/* ADAPTATION TÉLÉPHONE */
 @media (max-width: 600px) {
-    .sticky-action { position: sticky; bottom: 0; background: #000000; padding: 0.65rem 0 calc(0.45rem + env(safe-area-inset-bottom, 0px)); }
+    body { padding-left: 0.95rem; padding-right: 0.95rem; }
+
+    #setup-screen > .bar:first-of-type {
+        flex-direction: column;
+        align-items: stretch;
+    }
+    #btnSyncKey {
+        width: 100%;
+        justify-content: center;
+    }
+    .bar-links {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        width: 100%;
+        gap: 0.45rem;
+    }
+    .bar-links .text-btn {
+        width: 100%;
+        padding: 0.55rem 0.35rem;
+        font-size: 0.82rem;
+    }
+
+    .row {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 0.65rem;
+    }
+    .row-btns {
+        display: flex;
+        width: 100%;
+    }
+    .row-btns .btn-mini {
+        flex: 1;
+        text-align: center;
+    }
+
+    .sticky-action {
+        position: sticky;
+        bottom: 0;
+        background: #000000;
+        padding: 0.65rem 0 calc(0.45rem + env(safe-area-inset-bottom, 0px));
+        z-index: 5;
+    }
+
     .modal-bg { align-items: flex-end; padding: 0; }
-    .modal-box { max-width: 100%; border-radius: 16px 16px 0 0; border-bottom: none; }
+    .modal-box {
+        max-width: 100%;
+        max-height: 88dvh;
+        border-radius: 16px 16px 0 0;
+        border-bottom: none;
+        padding-bottom: calc(1.25rem + env(safe-area-inset-bottom, 0px));
+    }
 }
