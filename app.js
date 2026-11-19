@@ -20,21 +20,46 @@ let generatedQuiz = [];
 let quizProviderLabel = "";
 let userAnswers = {};
 
-// Verrous de sécurité anti-écrasement
+const MIN_READ_SCROLL_PERCENT = 92;
+const INSTANT_JUMP_MAX_MS = 1000;
+const INSTANT_JUMP_MIN_DELTA_PCT = 35;
+const FAST_READ_WPM = 360;
+const MIN_READ_TIME_MS = 15000;
+const MAX_READ_TIME_MS = 180000;
+
+let readingSession = {
+    maxScrollPercentReached: 0,
+    lastScrollPct: 0,
+    lastScrollTime: 0,
+    instantJumpDetected: false,
+    suppressJumpOnce: false,
+    accumulatedReadMs: 0,
+    activeSegmentStart: null
+};
+
 let isSaving = false;
 let accountLoaded = false;
 
+const emptyStats = () => ({
+    scoreTotal: 0,
+    quizzesCompleted: 0,
+    perfectScores: 0,
+    totalChaptersRead: 0,
+    streakDays: 0,
+    lastReadDate: null
+});
+
 let syncKey = localStorage.getItem("focus_read_sync_key") || null;
 let currentKeyPassword = localStorage.getItem("focus_read_sync_pwd") || "";
-let userStats = { scoreTotal: 0, quizzesCompleted: 0, perfectScores: 0, totalChaptersRead: 0, streakDays: 0, lastReadDate: null };
-
-// --- UTILITAIRES RÉSEAU & STOCKAGE ---
+let userStats = emptyStats();
 
 const esc = s => String(s).replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m]));
 const cleanKey = k => String(k).trim().replace(/[.#$\[\]/]/g, '_');
 const slugifyTitle = t => String(t || "sans_titre")
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48) || "sans_titre";
+
+const countWords = text => String(text || "").trim().split(/\s+/).filter(Boolean).length;
 
 const stripChapterPrefix = (label, fallbackIndex = 0) => String(label || "")
     .replace(/^chapitre\s*\d+\s*[:.-]?\s*/i, "")
@@ -60,6 +85,50 @@ const toArray = val => Array.isArray(val) ? val : Object.values(val || {});
 const mergeReadChapters = (...lists) => [...new Set(lists.flatMap(l => toArray(l)).filter(Boolean))];
 const isChapterValidated = (book, chap) => Boolean(book && chap && toArray(book.readChapters).includes(chap.id));
 
+function toggleModal(id, hidden) {
+    const el = $(id);
+    if (el) el.hidden = hidden;
+}
+
+function returnToSetup() {
+    showView('setup-screen');
+    renderLibrary(activeBook?.id);
+}
+
+function getMinimumReadingTimeMs(wordCount) {
+    const words = Math.max(0, wordCount || 0);
+    const estimatedMs = Math.round((words / FAST_READ_WPM) * 60000);
+    return Math.min(MAX_READ_TIME_MS, Math.max(MIN_READ_TIME_MS, estimatedMs));
+}
+
+function formatDurationFr(ms) {
+    const totalSec = Math.max(1, Math.ceil(ms / 1000));
+    if (totalSec < 60) return `${totalSec} s`;
+    const mins = Math.floor(totalSec / 60);
+    const secs = totalSec % 60;
+    return secs > 0 ? `${mins} min ${secs} s` : `${mins} min`;
+}
+
+function pauseReadTimer() {
+    if (readingSession.activeSegmentStart !== null) {
+        readingSession.accumulatedReadMs += Math.max(0, performance.now() - readingSession.activeSegmentStart);
+        readingSession.activeSegmentStart = null;
+    }
+}
+
+function resumeReadTimer() {
+    if (!$('game-screen')?.hidden && document.visibilityState === 'visible' && readingSession.activeSegmentStart === null) {
+        readingSession.activeSegmentStart = performance.now();
+    }
+}
+
+function getCurrentReadMs() {
+    const activeDelta = readingSession.activeSegmentStart !== null
+        ? Math.max(0, performance.now() - readingSession.activeSegmentStart)
+        : 0;
+    return readingSession.accumulatedReadMs + activeDelta;
+}
+
 function reindexChaptersAndProgress(rawChapters = [], readChapters = [], pausedPositions = {}) {
     const idMap = {};
     const chapters = toArray(rawChapters)
@@ -73,7 +142,7 @@ function reindexChaptersAndProgress(rawChapters = [], readChapters = [], pausedP
                 chapterNum: idx + 1,
                 label: stripChapterPrefix(c.label, idx),
                 text: c.text,
-                wordCount: c.wordCount || c.text.split(/\s+/).filter(Boolean).length
+                wordCount: c.wordCount || countWords(c.text)
             };
         });
 
@@ -101,13 +170,7 @@ function appendChaptersToBook(book, incomingChapters = []) {
         const sig = normalizeChapterSig(inc);
         if (seenSigs.has(sig)) continue;
         seenSigs.add(sig);
-        combined.push({
-            id: `chap_${combined.length + 1}`,
-            chapterNum: combined.length + 1,
-            label: stripChapterPrefix(inc.label, combined.length),
-            text: inc.text,
-            wordCount: inc.wordCount || inc.text.split(/\s+/).filter(Boolean).length
-        });
+        combined.push(inc);
         addedCount += 1;
     }
 
@@ -173,20 +236,19 @@ async function sha256(str) {
 }
 
 function showView(viewId) {
-    if (viewId !== 'game-screen') stopAutoScroll();
+    if (viewId !== 'game-screen') pauseReadTimer();
     ['setup-screen', 'game-screen', 'quiz-screen'].forEach(id => {
         const el = $(id);
         if (el) el.hidden = id !== viewId;
     });
     window.scrollTo(0, 0);
+    if (viewId === 'game-screen') resumeReadTimer();
 }
 
 function setSyncStatus(msg, online = false) {
     if ($('syncStatus')) $('syncStatus').textContent = msg;
     if ($('syncDot')) $('syncDot').classList.toggle('online', online);
 }
-
-// --- STATISTIQUES ---
 
 function getStreak(stats = userStats) {
     if (!stats?.lastReadDate || !stats?.streakDays) return 0;
@@ -213,25 +275,51 @@ function renderStats() {
 }
 
 function questionCount(words) {
-    const pages = (words || 0) / 250;
-    if (pages <= 2) return 4;
-    if (pages <= 5) return 8;
-    if (pages <= 9) return 10;
-    if (pages <= 14) return 12;
-    return 14;
+    const w = words || 0;
+    if (w < 800) return 4;
+    if (w < 1800) return 6;
+    if (w < 3200) return 7;
+    return 8;
 }
-
-// --- BACK-END : SYNCHRONISATION FIREBASE BLINDÉE ---
 
 function updateAccountUI() {
     $('syncKeyLabel').textContent = syncKey ? `${syncKey}${currentKeyPassword ? " · 🔒" : ""}` : "Définir un compte";
     $('current-lb-key').textContent = syncKey || "—";
 }
 
+function resetLocalAccountState() {
+    syncKey = null;
+    currentKeyPassword = "";
+    accountLoaded = false;
+    accountBooks = [];
+    activeBook = null;
+    userStats = emptyStats();
+    localStorage.removeItem("focus_read_sync_key");
+    localStorage.removeItem("focus_read_sync_pwd");
+    updateAccountUI();
+    renderStats();
+    renderLibrary();
+}
+
 async function canWriteAccount() {
     if (!syncKey || !accountLoaded) return false;
     const distantHash = await fb(`focus_read_users/${encodeURIComponent(syncKey)}/passwordHash`);
     return !distantHash || distantHash === await sha256(currentKeyPassword);
+}
+
+function buildChapterBatchPatch(chapters, startIndex, batchSize = 5) {
+    const patch = {};
+    chapters.slice(startIndex, startIndex + batchSize).forEach((c, idx) => {
+        const n = startIndex + idx;
+        patch[`chapters/${n}`] = {
+            id: c.id || `chap_${n + 1}`,
+            chapterNum: n + 1,
+            label: stripChapterPrefix(c.label, n),
+            text: c.text,
+            wordCount: c.wordCount || countWords(c.text)
+        };
+    });
+    return patch;
 }
 
 async function saveBookCloud(book) {
@@ -288,18 +376,7 @@ async function saveBookCloud(book) {
         await fb(`${base}/chapters`, "DELETE").catch(() => {});
 
         for (let i = 0; i < finalChapters.length; i += 5) {
-            const patch = {};
-            finalChapters.slice(i, i + 5).forEach((c, idx) => {
-                const n = i + idx;
-                patch[`chapters/${n}`] = {
-                    id: c.id || `chap_${n + 1}`,
-                    chapterNum: n + 1,
-                    label: stripChapterPrefix(c.label, n),
-                    text: c.text,
-                    wordCount: c.wordCount || c.text.split(/\s+/).filter(Boolean).length
-                };
-            });
-            await fb(base, "PATCH", patch);
+            await fb(base, "PATCH", buildChapterBatchPatch(finalChapters, i));
         }
 
         const full = { ...meta, chapters: finalChapters };
@@ -334,7 +411,6 @@ async function saveBookProgress(book) {
             return false;
         }
         const base = `focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`;
-
         const distantRead = await fb(`${base}/readChapters`).catch(() => []);
         const mergedRead = mergeReadChapters(distantRead, book.readChapters);
         book.readChapters = mergedRead;
@@ -392,12 +468,7 @@ async function pullAccount(silent = false) {
                 currentKeyPassword = pwd.trim();
             }
             if (await sha256(currentKeyPassword) !== data.passwordHash) {
-                syncKey = null;
-                currentKeyPassword = "";
-                accountLoaded = false;
-                localStorage.removeItem("focus_read_sync_key");
-                localStorage.removeItem("focus_read_sync_pwd");
-                updateAccountUI();
+                resetLocalAccountState();
                 return setSyncStatus("Mot de passe incorrect");
             }
             localStorage.setItem("focus_read_sync_pwd", currentKeyPassword);
@@ -486,22 +557,12 @@ async function switchAccount() {
     }
 
     const raw = val === "1" ? (prompt("Nom exact du compte :") || "") : val;
+    resetLocalAccountState();
     syncKey = cleanKey(raw) || ("READ-" + Math.random().toString(36).substring(2, 8).toUpperCase());
-    currentKeyPassword = "";
-    accountLoaded = false;
-    localStorage.removeItem("focus_read_sync_pwd");
     localStorage.setItem("focus_read_sync_key", syncKey);
-
-    accountBooks = [];
-    activeBook = null;
-    userStats = { scoreTotal: 0, quizzesCompleted: 0, perfectScores: 0, totalChaptersRead: 0, streakDays: 0, lastReadDate: null };
-    renderStats();
-    renderLibrary();
     updateAccountUI();
     await pullAccount();
 }
-
-// --- IMPORT EPUB & PARAMÈTRES DU LIVRE ---
 
 async function handleFileUpload(e) {
     const file = e.target.files[0];
@@ -548,7 +609,7 @@ function openBookSettings(bookId) {
     settingsBookId = book.id;
     $('book-settings-title').textContent = book.title;
     renderBookSettingsModal(book);
-    $('book-settings-overlay').hidden = false;
+    toggleModal('book-settings-overlay', false);
 }
 
 function renderBookSettingsModal(book) {
@@ -584,7 +645,7 @@ function renderBookSettingsModal(book) {
             const readCount = (book.readChapters || []).filter(id => book.chapters.some(c => c.id === id)).length;
             if (!accountLoaded || !syncKey || !book.id) return;
             if (!confirm(`Voulez-vous vraiment supprimer "${book.title}" et sa progression (${readCount}/${book.chapters.length} ch.) ?`)) return;
-            const typed = prompt(`Pour confirmer la suppression définitive, tapez : SUPPRIMER`);
+            const typed = prompt("Pour confirmer la suppression définitive, tapez : SUPPRIMER");
             if (typed !== "SUPPRIMER") return;
 
             delBtn.disabled = true;
@@ -594,7 +655,7 @@ function renderBookSettingsModal(book) {
                 await fb(`focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`, "DELETE");
                 if (isPub && isOwner) await fb(`focus_read_public_books/${encodeURIComponent(book.publicId || book.id)}`, "DELETE").catch(() => {});
                 accountBooks = accountBooks.filter(b => b.id !== book.id);
-                $('book-settings-overlay').hidden = true;
+                toggleModal('book-settings-overlay', true);
                 settingsBookId = null;
                 renderLibrary();
             } finally {
@@ -748,7 +809,7 @@ async function parseEpub(file) {
             .filter(Boolean);
 
         const text = blocks.length ? blocks.join('\n\n') : (doc.body?.textContent.replace(/\s+/g, ' ').trim() || "");
-        const wordCount = text.split(/\s+/).filter(Boolean).length;
+        const wordCount = countWords(text);
         if (wordCount < 45) continue;
 
         const num = chapters.length + 1;
@@ -768,12 +829,13 @@ async function publishPublic(book) {
     try {
         const pubId = book.publicId || `${slugifyTitle(book.title)}_${Date.now()}`;
         book.publicId = pubId;
-        await fb(`focus_read_public_books/${encodeURIComponent(pubId)}`, "PUT", {
+        const base = `focus_read_public_books/${encodeURIComponent(pubId)}`;
+        await fb(base, "PUT", {
             id: pubId, localId: book.id, title: book.title, fileName: book.fileName,
             sharedBy: syncKey || "Anonyme", chapterCount: book.chapters.length, publishedAt: Date.now()
         });
-        for (let i = 0; i < book.chapters.length; i++) {
-            await fb(`focus_read_public_books/${encodeURIComponent(pubId)}/chapters/${i}`, "PUT", book.chapters[i]);
+        for (let i = 0; i < book.chapters.length; i += 5) {
+            await fb(base, "PATCH", buildChapterBatchPatch(book.chapters, i));
         }
         return true;
     } catch {
@@ -863,106 +925,43 @@ async function selectChapter(idx, save = true) {
     }
 }
 
-// --- DÉFILEMENT AUTOMATIQUE ---
-
-const AUTO_SPEEDS = [0.5, 1, 1.5, 2, 3];
-let autoSpeedIdx = parseInt(localStorage.getItem("focus_read_autoscroll_speed_idx") || "1", 10);
-if (isNaN(autoSpeedIdx) || autoSpeedIdx < 0 || autoSpeedIdx >= AUTO_SPEEDS.length) autoSpeedIdx = 1;
-
-let autoScrollActive = false;
-let autoScrollRafId = null;
-let autoScrollLastTime = 0;
-let autoScrollRemainder = 0;
-
-function updateAutoScrollButtons() {
-    const toggleBtn = $('autoscroll-toggle-btn');
-    const speedBtn = $('autoscroll-speed-btn');
-    if (toggleBtn) toggleBtn.classList.toggle('active-mode', autoScrollActive);
-    if (speedBtn) speedBtn.textContent = `${AUTO_SPEEDS[autoSpeedIdx]}x`;
+function resetReadingSession(initialPct = 0, suppressJumpOnce = false) {
+    readingSession = {
+        maxScrollPercentReached: initialPct,
+        lastScrollPct: initialPct,
+        lastScrollTime: performance.now(),
+        instantJumpDetected: false,
+        suppressJumpOnce,
+        accumulatedReadMs: 0,
+        activeSegmentStart: null
+    };
 }
-
-function stopAutoScroll() {
-    autoScrollActive = false;
-    autoScrollRemainder = 0;
-    if (autoScrollRafId) {
-        cancelAnimationFrame(autoScrollRafId);
-        autoScrollRafId = null;
-    }
-    updateAutoScrollButtons();
-}
-
-function autoScrollStep(timestamp) {
-    if (!autoScrollActive || $('game-screen')?.hidden) {
-        stopAutoScroll();
-        return;
-    }
-    if (!autoScrollLastTime) autoScrollLastTime = timestamp;
-    const dt = Math.min(100, timestamp - autoScrollLastTime);
-    autoScrollLastTime = timestamp;
-
-    const pxPerSec = 26 * AUTO_SPEEDS[autoSpeedIdx];
-    autoScrollRemainder += (pxPerSec * dt) / 1000;
-
-    if (autoScrollRemainder >= 1) {
-        const stepPx = Math.floor(autoScrollRemainder);
-        autoScrollRemainder -= stepPx;
-        const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
-        if (window.scrollY >= maxScroll - 1) {
-            stopAutoScroll();
-            return;
-        }
-        window.scrollBy(0, stepPx);
-    }
-
-    autoScrollRafId = requestAnimationFrame(autoScrollStep);
-}
-
-function toggleAutoScroll() {
-    if (autoScrollActive) {
-        stopAutoScroll();
-    } else {
-        const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
-        if (maxScroll <= 0 || window.scrollY >= maxScroll - 1) return;
-        autoScrollActive = true;
-        autoScrollLastTime = 0;
-        autoScrollRemainder = 0;
-        updateAutoScrollButtons();
-        autoScrollRafId = requestAnimationFrame(autoScrollStep);
-    }
-}
-
-function cycleAutoScrollSpeed() {
-    autoSpeedIdx = (autoSpeedIdx + 1) % AUTO_SPEEDS.length;
-    localStorage.setItem("focus_read_autoscroll_speed_idx", String(autoSpeedIdx));
-    updateAutoScrollButtons();
-}
-
-// --- LECTURE & GÉNÉRATION DE QUIZ ROBUSTE (GEMINI + GROQ SECOURS) ---
 
 function startReading() {
-    stopAutoScroll();
     const chap = activeBook?.chapters[currentChapterIndex];
     if (!chap) return;
     activeText = chap.text;
     const validated = isChapterValidated(activeBook, chap);
-    const qCount = questionCount(chap.wordCount || activeText.split(/\s+/).length);
+    const qCount = questionCount(chap.wordCount || countWords(activeText));
 
     $('hud-chapter-title').textContent = chap.label;
     $('finish-reading-btn').textContent = validated
         ? "Chapitre déjà validé · Retour à l'accueil"
         : `Terminer & Lancer le quiz (${qCount} questions)`;
     $('text-track').textContent = activeText;
-    updateAutoScrollButtons();
+
+    const savedPos = activeBook.pausedPositions?.[chap.id] || 0;
+    resetReadingSession(0, savedPos > 0);
 
     showView('game-screen');
     requestAnimationFrame(() => {
-        window.scrollTo(0, activeBook.pausedPositions?.[chap.id] || 0);
+        window.scrollTo(0, savedPos);
         updateScroll();
     });
 }
 
 async function pauseReading() {
-    stopAutoScroll();
+    pauseReadTimer();
     const chap = activeBook?.chapters[currentChapterIndex];
     const btn = $('pause-reading-btn');
     if (btn) btn.disabled = true;
@@ -974,14 +973,31 @@ async function pauseReading() {
         await saveBookProgress(activeBook);
     }
     if (btn) btn.disabled = false;
-    showView('setup-screen');
-    renderLibrary(activeBook?.id);
+    returnToSetup();
 }
 
 function updateScroll() {
     if ($('game-screen').hidden) return;
     const max = document.documentElement.scrollHeight - window.innerHeight;
-    $('scroll-percent').textContent = max <= 0 ? "100%" : `${Math.min(100, Math.round((window.scrollY / max) * 100))}%`;
+    const pct = max <= 0 ? 100 : Math.min(100, Math.max(0, Math.round((window.scrollY / max) * 100)));
+    $('scroll-percent').textContent = `${pct}%`;
+
+    const now = performance.now();
+    const dt = now - readingSession.lastScrollTime;
+    const deltaPct = pct - readingSession.lastScrollPct;
+
+    if (readingSession.suppressJumpOnce) {
+        readingSession.suppressJumpOnce = false;
+    } else if (deltaPct >= INSTANT_JUMP_MIN_DELTA_PCT && dt > 0 && dt < INSTANT_JUMP_MAX_MS) {
+        readingSession.instantJumpDetected = true;
+    }
+
+    if (pct > readingSession.maxScrollPercentReached) {
+        readingSession.maxScrollPercentReached = pct;
+    }
+
+    readingSession.lastScrollPct = pct;
+    readingSession.lastScrollTime = now;
 }
 
 function prepareTextForQuiz(text, maxChars = 24000) {
@@ -991,103 +1007,98 @@ function prepareTextForQuiz(text, maxChars = 24000) {
     return `${text.slice(0, part)}\n[...]\n${text.slice(mid, mid + part)}\n[...]\n${text.slice(-part)}`;
 }
 
-function buildQuizPrompt(excerpt, qCount, rootAsObject = false) {
+function buildQuizPrompt(excerpt, targetCount, rootAsObject = false) {
     const schema = rootAsObject
         ? `{"questions":[{"question":"...","options":["Option 1","Option 2","Option 3","Option 4"],"answer":0,"explanation":"..."}]}`
         : `[{"question":"...","options":["Option 1","Option 2","Option 3","Option 4"],"answer":0,"explanation":"..."}]`;
 
-    return `Make a multiple-choice quiz of ${qCount} questions (4 options each, answer index 0-3) based on this chapter, in the same language as the chapter.
+    return `Generate EXACTLY ${targetCount} multiple-choice reading comprehension questions based strictly on the chapter excerpt below.
+Write "question", "options", and "explanation" in the exact same language as the excerpt.
 
-JSON only:
+Content rules:
+- Every question must test comprehension of facts, actions, decisions, discoveries, or exchanges explicitly present in this excerpt.
+- Do not rely on prior chapters, external knowledge of the book, or elements not stated in this excerpt.
+- Maintain a balanced, factual difficulty: avoid trivial micro-details (minor props, exact numbers, or isolated wording) as well as broad thematic questions answerable without reading the passage.
+
+Option rules:
+- Provide 4 options per question with similar length and grammatical structure.
+- Wrong options must stay closely tied to the plot, setting, characters, and vocabulary of the excerpt, sounding realistic and credible in context while being factually false or unsupported by the passage.
+- Keep "explanation" brief (1-2 sentences) and grounded strictly in the excerpt.
+
+Return valid JSON only:
 ${schema}
 
-Chapter:
+Chapter excerpt:
 """
 ${excerpt}
 """`;
 }
 
-async function callGeminiQuiz(apiKey, text, qCount) {
-    const models = ["gemini-2.5-flash-lite", "gemini-3.5-flash-lite"];
-    const excerpt = prepareTextForQuiz(text, 24000);
-    const prompt = buildQuizPrompt(excerpt, qCount, false);
-
+async function runQuizModels(models, excerpt, rootAsObject, callModel) {
+    const prompt = buildQuizPrompt(excerpt, rootAsObject);
     const errors = [];
     for (const model of models) {
         try {
-            const res = await fetchWithTimeout(
-                `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        contents: [{ parts: [{ text: prompt }] }],
-                        generationConfig: {
-                            responseMimeType: "application/json",
-                            temperature: 0.4
-                        }
-                    })
-                },
-                35000
-            );
-
-            const json = await res.json();
-            if (!res.ok) throw new Error(json.error?.message || `HTTP ${res.status}`);
-
-            const raw = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
-            const match = raw.match(/\[[\s\S]*\]/);
-            if (!match) throw new Error("Réponse JSON introuvable.");
-
-            const valid = sanitizeQuestions(JSON.parse(match[0]));
-            if (!valid.length) throw new Error("Aucune question valide générée.");
-            return { questions: valid, provider: `Gemini (${model})` };
+            const questions = await callModel(model, prompt);
+            if (!questions.length) throw new Error("Aucune question valide générée.");
+            return { questions, provider: `${rootAsObject ? "Groq" : "Gemini"} (${model})` };
         } catch (err) {
             errors.push(`${model} : ${err.message}`);
         }
     }
-    throw new Error(errors.join(" | ") || "Impossible de générer le quiz avec Gemini.");
+    throw new Error(errors.join(" | "));
 }
 
-async function callGroqQuiz(groqKey, text, qCount) {
-    const models = ["openai/gpt-oss-20b"];
+async function callGeminiQuiz(apiKey, text) {
+    const excerpt = prepareTextForQuiz(text, 24000);
+    return runQuizModels(["gemini-2.5-flash-lite", "gemini-3.5-flash-lite"], excerpt, false, async (model, prompt) => {
+        const res = await fetchWithTimeout(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+            {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    contents: [{ parts: [{ text: prompt }] }],
+                    generationConfig: { responseMimeType: "application/json", temperature: 0.4 }
+                })
+            },
+            35000
+        );
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error?.message || `HTTP ${res.status}`);
+        const raw = json.candidates?.[0]?.content?.parts?.[0]?.text || "";
+        const match = raw.match(/\[[\s\S]*\]/);
+        if (!match) throw new Error("Réponse JSON introuvable.");
+        return sanitizeQuestions(JSON.parse(match[0]));
+    });
+}
+
+async function callGroqQuiz(groqKey, text) {
     const excerpt = prepareTextForQuiz(text, 16000);
-    const prompt = buildQuizPrompt(excerpt, qCount, true);
-
-    const errors = [];
-    for (const model of models) {
-        try {
-            const res = await fetchWithTimeout(
-                "https://api.groq.com/openai/v1/chat/completions",
-                {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${groqKey}`
-                    },
-                    body: JSON.stringify({
-                        model,
-                        messages: [{ role: "user", content: prompt }],
-                        response_format: { type: "json_object" },
-                        temperature: 0.4
-                    })
+    return runQuizModels(["openai/gpt-oss-20b"], excerpt, true, async (model, prompt) => {
+        const res = await fetchWithTimeout(
+            "https://api.groq.com/openai/v1/chat/completions",
+            {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${groqKey}`
                 },
-                30000
-            );
-
-            const json = await res.json();
-            if (!res.ok) throw new Error(json.error?.message || `HTTP ${res.status}`);
-
-            const raw = json.choices?.[0]?.message?.content || "";
-            const parsed = JSON.parse(raw);
-            const list = Array.isArray(parsed) ? parsed : (parsed.questions || parsed.quiz || []);
-            const valid = sanitizeQuestions(list);
-            if (!valid.length) throw new Error("Aucune question valide générée.");
-            return { questions: valid, provider: `Groq (${model})` };
-        } catch (err) {
-            errors.push(`${model} : ${err.message}`);
-        }
-    }
-    throw new Error(errors.join(" | ") || "Impossible de générer le quiz avec Groq.");
+                body: JSON.stringify({
+                    model,
+                    messages: [{ role: "user", content: prompt }],
+                    response_format: { type: "json_object" },
+                    temperature: 0.4
+                })
+            },
+            30000
+        );
+        const json = await res.json();
+        if (!res.ok) throw new Error(json.error?.message || `HTTP ${res.status}`);
+        const parsed = JSON.parse(json.choices?.[0]?.message?.content || "");
+        const list = Array.isArray(parsed) ? parsed : (parsed.questions || parsed.quiz || []);
+        return sanitizeQuestions(list);
+    });
 }
 
 function getConfiguredApiKeys() {
@@ -1103,21 +1114,16 @@ function getConfiguredApiKeys() {
     return { geminiKey, groqKey };
 }
 
-async function generateQuizWithFallback(text, qCount) {
+async function generateQuizWithFallback(text) {
     const { geminiKey, groqKey } = getConfiguredApiKeys();
-
-    if (!geminiKey) {
-        throw new Error("Une clé API Gemini est requise avant d'utiliser Groq.");
-    }
+    if (!geminiKey) throw new Error("Une clé API Gemini est requise avant d'utiliser Groq.");
 
     try {
-        return await callGeminiQuiz(geminiKey, text, qCount);
+        return await callGeminiQuiz(geminiKey, text);
     } catch (e) {
-        if (!groqKey) {
-            throw new Error(`Gemini (${e.message})`);
-        }
+        if (!groqKey) throw new Error(`Gemini (${e.message})`);
         try {
-            return await callGroqQuiz(groqKey, text, qCount);
+            return await callGroqQuiz(groqKey, text);
         } catch (groqErr) {
             throw new Error(`Gemini (${e.message}) → Groq (${groqErr.message})`);
         }
@@ -1125,21 +1131,50 @@ async function generateQuizWithFallback(text, qCount) {
 }
 
 async function finishAndQuiz() {
-    stopAutoScroll();
+    pauseReadTimer();
     const chap = activeBook?.chapters[currentChapterIndex];
+    const alreadyValidated = isChapterValidated(activeBook, chap);
 
-    if (isChapterValidated(activeBook, chap)) {
+    if (alreadyValidated) {
         if (activeBook?.pausedPositions?.[chap.id]) {
             delete activeBook.pausedPositions[chap.id];
             await saveBookProgress(activeBook);
         }
-        showView('setup-screen');
-        renderLibrary(activeBook?.id);
+        returnToSetup();
+        return;
+    }
+
+    if (readingSession.maxScrollPercentReached < MIN_READ_SCROLL_PERCENT) {
+        resumeReadTimer();
+        alert(
+            `Descendez au moins jusqu'à ${MIN_READ_SCROLL_PERCENT} % du chapitre avant de lancer le quiz (progression max atteinte : ${readingSession.maxScrollPercentReached} %).`
+        );
+        return;
+    }
+
+    if (readingSession.instantJumpDetected) {
+        resetReadingSession(readingSession.lastScrollPct, false);
+        resumeReadTimer();
+        alert(
+            "Un saut rapide a été détecté dans le chapitre. Faites défiler le texte progressivement jusqu'en bas pour valider votre lecture."
+        );
+        return;
+    }
+
+    const wordCount = chap?.wordCount || countWords(activeText);
+    const minReadMs = getMinimumReadingTimeMs(wordCount);
+    const elapsedMs = getCurrentReadMs();
+
+    if (elapsedMs < minReadMs) {
+        const remainingMs = minReadMs - elapsedMs;
+        resumeReadTimer();
+        alert(
+            `Prenez encore au moins ${formatDurationFr(remainingMs)} de lecture avant de lancer le quiz (temps minimum estimé : ${formatDurationFr(minReadMs)}).`
+        );
         return;
     }
 
     const { geminiKey } = getConfiguredApiKeys();
-
     if (!geminiKey) {
         await pauseReading();
         if ($('api-details-box')) $('api-details-box').open = true;
@@ -1147,13 +1182,13 @@ async function finishAndQuiz() {
         return;
     }
 
-    const qCount = questionCount(chap?.wordCount || activeText.split(/\s+/).length);
+    const qCount = questionCount(wordCount);
     const btn = $('finish-reading-btn');
     btn.disabled = true;
     btn.textContent = "Création du quiz en cours...";
 
     try {
-        const result = await generateQuizWithFallback(activeText, qCount);
+        const result = await generateQuizWithFallback(activeText);
         generatedQuiz = result.questions;
         quizProviderLabel = result.provider;
 
@@ -1163,6 +1198,7 @@ async function finishAndQuiz() {
         }
         renderQuiz();
     } catch (e) {
+        resumeReadTimer();
         alert("Erreur lors de la génération du quiz : " + (e.name === 'AbortError' ? "Délai dépassé (vérifiez votre connexion)." : e.message));
     } finally {
         btn.disabled = false;
@@ -1184,7 +1220,7 @@ function renderQuiz() {
 
     if (quizProviderLabel) {
         box.insertAdjacentHTML('beforeend', `
-            <p class="small muted" id="quiz-ai-provider">Généré par : <strong>${esc(quizProviderLabel)}</strong></p>
+            <p class="small" id="quiz-ai-provider">Généré par : <strong>${esc(quizProviderLabel)}</strong></p>
         `);
     }
 
@@ -1210,6 +1246,18 @@ function renderQuiz() {
     showView('quiz-screen');
 }
 
+async function applyQuizPerfectStats(chap, pts) {
+    userStats.scoreTotal += pts;
+    userStats.perfectScores += 1;
+    activeBook.readChapters = mergeReadChapters(activeBook.readChapters, [chap.id]);
+    userStats.totalChaptersRead += 1;
+    if (userStats.lastReadDate === dateKey(-1)) userStats.streakDays = (userStats.streakDays || 0) + 1;
+    else if (userStats.lastReadDate !== dateKey(0)) userStats.streakDays = 1;
+    userStats.lastReadDate = dateKey(0);
+    activeBook.updatedAt = Date.now();
+    await saveBookProgress(activeBook);
+}
+
 async function evaluateQuiz() {
     if (Object.keys(userAnswers).length < generatedQuiz.length) return alert("Répondez à toutes les questions.");
 
@@ -1224,28 +1272,16 @@ async function evaluateQuiz() {
 
         div.querySelectorAll('.q-opt').forEach((b, i) => {
             b.disabled = true;
-            if (i === chosen) b.classList.add('selected');
-            else b.classList.remove('selected');
+            b.classList.toggle('selected', i === chosen);
         });
     });
 
     const total = generatedQuiz.length;
     const perfect = score === total;
-    const pts = (!alreadyValidated && perfect) ? (total * 10 + 20) : 0;
 
     if (!alreadyValidated) {
         userStats.quizzesCompleted += 1;
-        if (perfect) {
-            userStats.scoreTotal += pts;
-            userStats.perfectScores += 1;
-            activeBook.readChapters = mergeReadChapters(activeBook.readChapters, [chap.id]);
-            userStats.totalChaptersRead += 1;
-            if (userStats.lastReadDate === dateKey(-1)) userStats.streakDays = (userStats.streakDays || 0) + 1;
-            else if (userStats.lastReadDate !== dateKey(0)) userStats.streakDays = 1;
-            userStats.lastReadDate = dateKey(0);
-            activeBook.updatedAt = Date.now();
-            await saveBookProgress(activeBook);
-        }
+        if (perfect) await applyQuizPerfectStats(chap, total * 10 + 20);
         renderStats();
         await pushStats();
     }
@@ -1253,7 +1289,7 @@ async function evaluateQuiz() {
     $('quiz-container').insertAdjacentHTML('afterbegin', `
         <div class="score-banner">
             <strong>${score} / ${total} (${Math.round((score / total) * 100)}%)</strong>
-            ${quizProviderLabel ? `<div class="small muted">IA : ${esc(quizProviderLabel)}</div>` : ''}
+            ${quizProviderLabel ? `<div class="small">IA : ${esc(quizProviderLabel)}</div>` : ''}
         </div>
     `);
 
@@ -1268,16 +1304,14 @@ async function evaluateQuiz() {
     }
 }
 
-// --- MODALES ---
-
 async function openCommunity() {
-    $('community-overlay').hidden = false;
+    toggleModal('community-overlay', false);
     const list = $('community-list');
-    list.innerHTML = '<div class="row"><span class="muted">Chargement...</span></div>';
+    list.innerHTML = '<div class="row static-row"><span>Chargement...</span></div>';
 
     try {
         const data = await fb('focus_read_public_books');
-        if (!data) return (list.innerHTML = '<div class="row"><span class="muted">Aucun livre disponible.</span></div>');
+        if (!data) return (list.innerHTML = '<div class="row static-row"><span>Aucun livre disponible.</span></div>');
 
         const owned = new Set(accountBooks.flatMap(b => [b.id, b.publicId, `book_${slugifyTitle(b.title)}`].filter(Boolean)));
         list.innerHTML = '';
@@ -1313,19 +1347,19 @@ async function openCommunity() {
             list.appendChild(row);
         });
     } catch (e) {
-        list.innerHTML = `<div class="row"><span class="muted">Erreur : ${e.message}</span></div>`;
+        list.innerHTML = `<div class="row static-row"><span>Erreur : ${esc(e.message)}</span></div>`;
     }
 }
 
 async function openLeaderboard() {
-    $('leaderboard-overlay').hidden = false;
+    toggleModal('leaderboard-overlay', false);
     updateAccountUI();
     const list = $('leaderboard-list');
-    list.innerHTML = '<div class="row"><span class="muted">Chargement...</span></div>';
+    list.innerHTML = '<div class="row static-row"><span>Chargement...</span></div>';
 
     try {
         const data = await fb('focus_read_users');
-        if (!data) return (list.innerHTML = '<div class="row"><span class="muted">Aucun lecteur.</span></div>');
+        if (!data) return (list.innerHTML = '<div class="row static-row"><span>Aucun lecteur.</span></div>');
 
         const ranked = Object.entries(data)
             .map(([k, v]) => {
@@ -1344,11 +1378,11 @@ async function openLeaderboard() {
             .slice(0, 30);
 
         if (!ranked.length) {
-            return (list.innerHTML = '<div class="row"><span class="muted">Aucun lecteur ayant complété au moins un chapitre.</span></div>');
+            return (list.innerHTML = '<div class="row static-row"><span>Aucun lecteur ayant complété au moins un chapitre.</span></div>');
         }
 
         list.innerHTML = ranked.map((p, i) => `
-            <div class="row ${p.k === syncKey ? 'me' : ''}">
+            <div class="row static-row ${p.k === syncKey ? 'me' : ''}">
                 <div class="row-info">
                     <span class="row-title">${i + 1}. ${esc(p.k)}</span>
                     <span class="row-sub">Série ${p.st} j · ${p.ch} ch. · ${p.ratioText}</span>
@@ -1357,11 +1391,9 @@ async function openLeaderboard() {
             </div>
         `).join('');
     } catch (e) {
-        list.innerHTML = `<div class="row"><span class="muted">Erreur : ${e.message}</span></div>`;
+        list.innerHTML = `<div class="row static-row"><span>Erreur : ${esc(e.message)}</span></div>`;
     }
 }
-
-// --- ÉVÉNEMENTS & INIT ---
 
 const syncApiKeyInputsState = () => {
     const geminiVal = ($('api-key')?.value.trim() || DEFAULT_API_KEY || "");
@@ -1419,58 +1451,47 @@ on('chapter-select', 'onchange', e => selectChapter(e.target.value, true));
 
 on('start-btn', 'onclick', startReading);
 on('pause-reading-btn', 'onclick', pauseReading);
-on('autoscroll-toggle-btn', 'onclick', toggleAutoScroll);
-on('autoscroll-speed-btn', 'onclick', cycleAutoScrollSpeed);
 window.addEventListener('scroll', updateScroll, { passive: true });
-window.addEventListener('wheel', () => { if (autoScrollActive) stopAutoScroll(); }, { passive: true });
-window.addEventListener('touchstart', () => { if (autoScrollActive) stopAutoScroll(); }, { passive: true });
 on('finish-reading-btn', 'onclick', finishAndQuiz);
 
-on('abandon-quiz-btn', 'onclick', () => confirm("Quitter le quiz ?") && (showView('setup-screen'), renderLibrary(activeBook?.id)));
+on('abandon-quiz-btn', 'onclick', () => confirm("Quitter le quiz ?") && returnToSetup());
 on('submit-quiz-btn', 'onclick', evaluateQuiz);
 on('retry-chapter-btn', 'onclick', startReading);
 on('next-chapter-btn', 'onclick', async () => { await selectChapter(currentChapterIndex + 1, true); startReading(); });
-on('restart-btn', 'onclick', () => { showView('setup-screen'); renderLibrary(activeBook?.id); });
+on('restart-btn', 'onclick', returnToSetup);
 
 on('btnSyncKey', 'onclick', switchAccount);
-on('btnTutorial', 'onclick', () => { if ($('tutorial-overlay')) $('tutorial-overlay').hidden = false; });
+on('btnTutorial', 'onclick', () => toggleModal('tutorial-overlay', false));
 on('btnCommunity', 'onclick', openCommunity);
 on('btnLeaderboard', 'onclick', openLeaderboard);
 
-document.querySelectorAll('[data-close]').forEach(btn => btn.onclick = () => {
-    const target = $(btn.dataset.close);
-    if (target) target.hidden = true;
-});
+document.querySelectorAll('[data-close]').forEach(btn => btn.onclick = () => toggleModal(btn.dataset.close, true));
 document.querySelectorAll('.modal-bg').forEach(ov => ov.onclick = e => { if (e.target === ov) ov.hidden = true; });
 
 document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') stopAutoScroll();
-    if (document.visibilityState === 'visible' && syncKey && !$('setup-screen').hidden) {
-        pullAccount(true);
+    if (document.visibilityState === 'hidden') {
+        pauseReadTimer();
+    } else if (document.visibilityState === 'visible') {
+        resumeReadTimer();
+        if (syncKey && !$('setup-screen').hidden) pullAccount(true);
     }
 });
 
-// --- TAILLE DU TEXTE (LECTURE & QUIZ) ---
 let readFontSize = parseFloat(localStorage.getItem("focus_read_font_size")) || 1.15;
 const applyFontSize = () => {
-    const sizeCss = `${readFontSize.toFixed(2)}rem`;
-    document.documentElement.style.setProperty('--read-size', sizeCss);
+    document.documentElement.style.setProperty('--read-size', `${readFontSize.toFixed(2)}rem`);
     localStorage.setItem("focus_read_font_size", readFontSize.toFixed(2));
     updateScroll();
 };
-const decreaseFontSize = () => {
-    readFontSize = Math.max(0.85, readFontSize - 0.1);
-    applyFontSize();
-};
-const increaseFontSize = () => {
-    readFontSize = Math.min(1.75, readFontSize + 0.1);
+const stepFontSize = delta => {
+    readFontSize = Math.min(1.75, Math.max(0.85, readFontSize + delta));
     applyFontSize();
 };
 
-on('font-dec-btn', 'onclick', decreaseFontSize);
-on('font-inc-btn', 'onclick', increaseFontSize);
-on('quiz-font-dec-btn', 'onclick', decreaseFontSize);
-on('quiz-font-inc-btn', 'onclick', increaseFontSize);
+on('font-dec-btn', 'onclick', () => stepFontSize(-0.1));
+on('font-inc-btn', 'onclick', () => stepFontSize(0.1));
+on('quiz-font-dec-btn', 'onclick', () => stepFontSize(-0.1));
+on('quiz-font-inc-btn', 'onclick', () => stepFontSize(0.1));
 applyFontSize();
 
 if ('serviceWorker' in navigator) {
