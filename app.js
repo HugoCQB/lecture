@@ -8,6 +8,8 @@ const DB_URL = RAW_DB_URL.replace(/\/+$/, '');
 
 const DEFAULT_API_KEY = (typeof ENV !== 'undefined' && ENV.DEFAULT_GEMINI_API_KEY)
     ? ENV.DEFAULT_GEMINI_API_KEY : "";
+const DEFAULT_GROQ_API_KEY = (typeof ENV !== 'undefined' && ENV.DEFAULT_GROQ_API_KEY)
+    ? ENV.DEFAULT_GROQ_API_KEY : "";
 
 let accountBooks = [];
 let activeBook = null;
@@ -126,6 +128,18 @@ function shuffleQuestionOptions(q) {
         options: indexed.map(item => item.text),
         answer: indexed.findIndex(item => item.isCorrect)
     };
+}
+
+function sanitizeQuestions(rawQuestions) {
+    if (!Array.isArray(rawQuestions)) return [];
+    return rawQuestions
+        .filter(q =>
+            q && typeof q.question === 'string' &&
+            Array.isArray(q.options) && q.options.length === 4 &&
+            q.options.every(o => typeof o === 'string' && o.trim().length > 0) &&
+            typeof q.answer === 'number' && Number.isInteger(q.answer) && q.answer >= 0 && q.answer < 4
+        )
+        .map(shuffleQuestionOptions);
 }
 
 async function fetchWithTimeout(url, opts = {}, timeoutMs = 15000) {
@@ -923,7 +937,7 @@ function cycleAutoScrollSpeed() {
     updateAutoScrollButtons();
 }
 
-// --- LECTURE & GÉNÉRATION DE QUIZ ROBUSTE ---
+// --- LECTURE & GÉNÉRATION DE QUIZ ROBUSTE (GEMINI + GROQ SECOURS) ---
 
 function startReading() {
     stopAutoScroll();
@@ -977,10 +991,18 @@ function prepareTextForQuiz(text, maxChars = 28000) {
     return `${text.slice(0, part)}\n[...]\n${text.slice(mid, mid + part)}\n[...]\n${text.slice(-part)}`;
 }
 
+function buildQuizPrompt(excerpt, qCount, rootAsObject = false) {
+    const schema = rootAsObject
+        ? `{"questions":[{"question":"...","options":["Choix 1","Choix 2","Choix 3","Choix 4"],"answer":0,"explanation":"Explication courte"}]}`
+        : `[{"question":"...","options":["Choix 1","Choix 2","Choix 3","Choix 4"],"answer":0,"explanation":"Explication courte"}]`;
+
+    return `Tu es un professeur exigeant. À partir du texte suivant, génère exactement ${qCount} questions QCM de compréhension à 4 choix (index 0, 1, 2 ou 3) couvrant l'ensemble du passage.\nRègles strictes pour éviter que la bonne réponse soit devinable : les 4 options doivent avoir une longueur comparable (environ 8 à 18 mots chacune), un niveau de précision et un style de formulation identiques, sans indices ni détails superflus réservés à la bonne réponse.\nFormat JSON attendu : ${schema}\n\nTexte :\n"""\n${excerpt}\n"""`;
+}
+
 async function callGeminiQuiz(apiKey, text, qCount) {
     const models = ["gemini-3.5-flash-lite"];
-    const excerpt = prepareTextForQuiz(text);
-    const prompt = `Tu es un professeur exigeant. À partir du texte suivant, génère exactement ${qCount} questions QCM de compréhension à 4 choix (index 0, 1, 2 ou 3) couvrant l'ensemble du passage.\nRègles strictes pour éviter que la bonne réponse soit devinable : les 4 options doivent avoir une longueur comparable (environ 8 à 18 mots chacune), un niveau de précision et un style de formulation identiques, sans indices ni détails superflus réservés à la bonne réponse.\nFormat JSON attendu : [{"question":"...","options":["Choix 1","Choix 2","Choix 3","Choix 4"],"answer":0,"explanation":"Explication courte"}]\n\nTexte :\n"""\n${excerpt}\n"""`;
+    const excerpt = prepareTextForQuiz(text, 28000);
+    const prompt = buildQuizPrompt(excerpt, qCount, false);
 
     const errors = [];
     for (const model of models) {
@@ -1008,23 +1030,91 @@ async function callGeminiQuiz(apiKey, text, qCount) {
             const match = raw.match(/\[[\s\S]*\]/);
             if (!match) throw new Error("Réponse JSON introuvable.");
 
-            const parsed = JSON.parse(match[0]);
-            const valid = parsed
-                .filter(q =>
-                    q && typeof q.question === 'string' &&
-                    Array.isArray(q.options) && q.options.length === 4 &&
-                    q.options.every(o => typeof o === 'string' && o.trim().length > 0) &&
-                    typeof q.answer === 'number' && Number.isInteger(q.answer) && q.answer >= 0 && q.answer < 4
-                )
-                .map(shuffleQuestionOptions);
-
+            const valid = sanitizeQuestions(JSON.parse(match[0]));
             if (!valid.length) throw new Error("Aucune question valide générée.");
             return valid;
         } catch (err) {
             errors.push(`${model} : ${err.message}`);
         }
     }
-    throw new Error(errors.join(" | ") || "Impossible de générer le quiz.");
+    throw new Error(errors.join(" | ") || "Impossible de générer le quiz avec Gemini.");
+}
+
+async function callGroqQuiz(groqKey, text, qCount) {
+    // Modèles gratuits Groq proches de Flash-Lite, calibrés sous la limite gratuite de 8 000 TPM
+    const models = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"];
+    const excerpt = prepareTextForQuiz(text, 16000);
+    const prompt = buildQuizPrompt(excerpt, qCount, true);
+
+    const errors = [];
+    for (const model of models) {
+        try {
+            const res = await fetchWithTimeout(
+                "https://api.groq.com/openai/v1/chat/completions",
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${groqKey}`
+                    },
+                    body: JSON.stringify({
+                        model,
+                        messages: [{ role: "user", content: prompt }],
+                        response_format: { type: "json_object" },
+                        temperature: 0.3
+                    })
+                },
+                30000
+            );
+
+            const json = await res.json();
+            if (!res.ok) throw new Error(json.error?.message || `HTTP ${res.status}`);
+
+            const raw = json.choices?.[0]?.message?.content || "";
+            const parsed = JSON.parse(raw);
+            const list = Array.isArray(parsed) ? parsed : (parsed.questions || parsed.quiz || []);
+            const valid = sanitizeQuestions(list);
+            if (!valid.length) throw new Error("Aucune question valide générée.");
+            return valid;
+        } catch (err) {
+            errors.push(`${model} : ${err.message}`);
+        }
+    }
+    throw new Error(errors.join(" | ") || "Impossible de générer le quiz avec Groq.");
+}
+
+function getConfiguredApiKeys() {
+    const storedGemini = localStorage.getItem("focus_read_gemini_key") || "";
+    const geminiKey = $('api-key')?.value.trim() || storedGemini || DEFAULT_API_KEY;
+
+    const groqInput = $('groq-api-key');
+    const storedGroq = localStorage.getItem("focus_read_groq_key") || "";
+    const groqKey = geminiKey
+        ? (groqInput ? groqInput.value.trim() : (storedGroq || DEFAULT_GROQ_API_KEY))
+        : "";
+
+    return { geminiKey, groqKey };
+}
+
+async function generateQuizWithFallback(text, qCount) {
+    const { geminiKey, groqKey } = getConfiguredApiKeys();
+
+    if (!geminiKey) {
+        throw new Error("Une clé API Gemini est requise avant d'utiliser Groq.");
+    }
+
+    try {
+        return await callGeminiQuiz(geminiKey, text, qCount);
+    } catch (e) {
+        if (!groqKey) {
+            throw new Error(`Gemini (${e.message})`);
+        }
+        try {
+            return await callGroqQuiz(groqKey, text, qCount);
+        } catch (groqErr) {
+            throw new Error(`Gemini (${e.message}) → Groq (${groqErr.message})`);
+        }
+    }
 }
 
 async function finishAndQuiz() {
@@ -1041,13 +1131,12 @@ async function finishAndQuiz() {
         return;
     }
 
-    const storedKey = localStorage.getItem("focus_read_gemini_key") || "";
-    const apiKey = $('api-key')?.value.trim() || storedKey || DEFAULT_API_KEY;
+    const { geminiKey } = getConfiguredApiKeys();
 
-    if (!apiKey) {
+    if (!geminiKey) {
         await pauseReading();
         if ($('api-details-box')) $('api-details-box').open = true;
-        alert("Entrez votre clé API Gemini en bas de l'accueil pour générer le quiz (votre position de lecture a été sauvegardée).");
+        alert("Renseignez d'abord votre clé API Gemini en bas de l'accueil pour générer le quiz (votre position de lecture a été sauvegardée).");
         return;
     }
 
@@ -1057,7 +1146,7 @@ async function finishAndQuiz() {
     btn.textContent = "Création du quiz en cours...";
 
     try {
-        generatedQuiz = await callGeminiQuiz(apiKey, activeText, qCount);
+        generatedQuiz = await generateQuizWithFallback(activeText, qCount);
 
         if (activeBook?.pausedPositions?.[chap?.id]) {
             delete activeBook.pausedPositions[chap.id];
@@ -1257,15 +1346,51 @@ async function openLeaderboard() {
 
 // --- ÉVÉNEMENTS & INIT ---
 
+const syncApiKeyInputsState = () => {
+    const geminiVal = ($('api-key')?.value.trim() || DEFAULT_API_KEY || "");
+    const groqInput = $('groq-api-key');
+    if (!groqInput) return;
+
+    if (!geminiVal) {
+        groqInput.value = "";
+        groqInput.disabled = true;
+        localStorage.removeItem("focus_read_groq_key");
+    } else {
+        groqInput.disabled = false;
+        if (!groqInput.value.trim()) {
+            const restored = localStorage.getItem("focus_read_groq_key") || DEFAULT_GROQ_API_KEY || "";
+            if (restored) groqInput.value = restored;
+        }
+    }
+};
+
 const updateApiTag = () => {
-    const ok = Boolean($('api-key')?.value.trim() || DEFAULT_API_KEY);
-    if ($('api-status-tag')) $('api-status-tag').textContent = ok ? "OK" : "Requise";
-    if (!ok && $('api-details-box')) $('api-details-box').open = true;
+    syncApiKeyInputsState();
+    const { geminiKey, groqKey } = getConfiguredApiKeys();
+    if ($('api-status-tag')) {
+        if (geminiKey && groqKey) $('api-status-tag').textContent = "OK + Secours";
+        else if (geminiKey) $('api-status-tag').textContent = "OK";
+        else $('api-status-tag').textContent = "Requise";
+    }
+    if (!geminiKey && $('api-details-box')) $('api-details-box').open = true;
 };
 
 on('api-key', 'oninput', e => {
     const v = e.target.value.trim();
     v ? localStorage.setItem("focus_read_gemini_key", v) : localStorage.removeItem("focus_read_gemini_key");
+    updateApiTag();
+});
+
+on('groq-api-key', 'oninput', e => {
+    const { geminiKey } = getConfiguredApiKeys();
+    if (!geminiKey) {
+        e.target.value = "";
+        localStorage.removeItem("focus_read_groq_key");
+        updateApiTag();
+        return;
+    }
+    const v = e.target.value.trim();
+    v ? localStorage.setItem("focus_read_groq_key", v) : localStorage.removeItem("focus_read_groq_key");
     updateApiTag();
 });
 
@@ -1337,6 +1462,7 @@ if ('serviceWorker' in navigator) {
 
 (async () => {
     if ($('api-key')) $('api-key').value = localStorage.getItem("focus_read_gemini_key") || DEFAULT_API_KEY;
+    if ($('groq-api-key')) $('groq-api-key').value = localStorage.getItem("focus_read_groq_key") || DEFAULT_GROQ_API_KEY;
     updateApiTag();
     updateAccountUI();
     renderStats();

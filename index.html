@@ -59,11 +59,12 @@
 
         <details class="api-drawer" id="api-details-box">
             <summary>
-                <span>Clé API Gemini</span>
+                <span>Clés API (Gemini requis + Groq secours)</span>
                 <span id="api-status-tag" class="muted">Requise</span>
             </summary>
-            <div class="drawer-content">
-                <input type="password" id="api-key" placeholder="AIzaSy..." autocomplete="off">
+            <div class="drawer-content stack">
+                <input type="password" id="api-key" placeholder="Clé API Gemini requise (AIzaSy...)" autocomplete="off">
+                <input type="password" id="groq-api-key" placeholder="Clé API Groq secours (Gemini d'abord)" autocomplete="off" disabled>
             </div>
         </details>
 
@@ -149,6 +150,7 @@
             <div class="modal-scroll prose">
                 <p><strong>Compte :</strong> Cliquez sur votre identifiant en haut à gauche pour changer de profil ou définir un mot de passe.</p>
                 <p><strong>Livres &amp; Chapitres :</strong> Importez vos fichiers <code>.epub</code>, ou ajoutez des titres depuis le <em>Catalogue</em>. Utilisez le bouton <em>Paramètres</em> d'un livre pour gérer sa visibilité (public/privé), le supprimer, ajouter des chapitres depuis un EPUB, changer leur ordre ou supprimer des chapitres.</p>
+                <p><strong>Clés API :</strong> Renseignez d'abord votre clé Gemini (obligatoire), puis éventuellement une clé Groq (<code>gsk_...</code>) en secours pour basculer automatiquement si Gemini est indisponible ou à quota.</p>
                 <p><strong>Validation &amp; Points :</strong> Les points ne sont attribués qu'en cas de <strong>100 %</strong> de bonnes réponses au quiz. Le ratio QCM correspond aux quiz réussis à 100 % sur l'ensemble des quiz effectués.</p>
             </div>
         </div>
