@@ -17,6 +17,7 @@ let settingsBookId = null;
 let currentChapterIndex = 0;
 let activeText = "";
 let generatedQuiz = [];
+let quizProviderLabel = "";
 let userAnswers = {};
 
 // Verrous de sécurité anti-écrasement
@@ -213,12 +214,12 @@ function renderStats() {
 
 function questionCount(words) {
     const pages = (words || 0) / 250;
-    if (pages <= 2) return 3;
-    if (pages <= 5) return 4;
-    if (pages <= 9) return 6;
-    if (pages <= 15) return 8;
-    if (pages <= 22) return 10;
-    return 12;
+    if (pages <= 2) return 4;
+    if (pages <= 5) return 6;
+    if (pages <= 9) return 8;
+    if (pages <= 14) return 11;
+    if (pages <= 20) return 14;
+    return 16;
 }
 
 // --- BACK-END : SYNCHRONISATION FIREBASE BLINDÉE ---
@@ -993,10 +994,26 @@ function prepareTextForQuiz(text, maxChars = 28000) {
 
 function buildQuizPrompt(excerpt, qCount, rootAsObject = false) {
     const schema = rootAsObject
-        ? `{"questions":[{"question":"...","options":["Choix 1","Choix 2","Choix 3","Choix 4"],"answer":0,"explanation":"Explication courte"}]}`
-        : `[{"question":"...","options":["Choix 1","Choix 2","Choix 3","Choix 4"],"answer":0,"explanation":"Explication courte"}]`;
+        ? `{"questions":[{"question":"...","options":["Option 1","Option 2","Option 3","Option 4"],"answer":0,"explanation":"..."}]}`
+        : `[{"question":"...","options":["Option 1","Option 2","Option 3","Option 4"],"answer":0,"explanation":"..."}]`;
 
-    return `Tu es un professeur exigeant. À partir du texte suivant, génère exactement ${qCount} questions QCM de compréhension à 4 choix (index 0, 1, 2 ou 3) couvrant l'ensemble du passage.\nRègles strictes pour éviter que la bonne réponse soit devinable : les 4 options doivent avoir une longueur comparable (environ 8 à 18 mots chacune), un niveau de précision et un style de formulation identiques, sans indices ni détails superflus réservés à la bonne réponse.\nFormat JSON attendu : ${schema}\n\nTexte :\n"""\n${excerpt}\n"""`;
+    return `You are a demanding reading comprehension professor. Write the entire output ("question", "options", "explanation") strictly in the EXACT SAME LANGUAGE as the provided story excerpt. Never translate into another language.
+
+Generate exactly ${qCount} multiple-choice questions (4 options each, index 0, 1, 2, or 3) covering the whole passage.
+
+Difficulty & fairness rules:
+1. Make each question impossible to answer by pure guessing or general world knowledge without having read the passage, yet clearly answerable for someone who read the passage carefully.
+2. Anchor questions in concrete events, specific choices, exact sequences, relationships, or explicit facts stated in the passage rather than vague generalizations or trivial clichés.
+3. Craft all 3 wrong distractors so they sound realistic and consistent with the story's tone and vocabulary, using plausible twists, swapped details, or partial inaccuracies rather than absurd or obviously false statements.
+4. Keep all 4 options at a similar length (around 10 to 20 words each), similar grammatical structure, and equal level of detail so the right answer does not stand out by length or phrasing.
+
+Return valid JSON only matching this structure:
+${schema}
+
+Passage:
+"""
+${excerpt}
+"""`;
 }
 
 async function callGeminiQuiz(apiKey, text, qCount) {
@@ -1016,7 +1033,7 @@ async function callGeminiQuiz(apiKey, text, qCount) {
                         contents: [{ parts: [{ text: prompt }] }],
                         generationConfig: {
                             responseMimeType: "application/json",
-                            temperature: 0.3
+                            temperature: 0.45
                         }
                     })
                 },
@@ -1032,7 +1049,7 @@ async function callGeminiQuiz(apiKey, text, qCount) {
 
             const valid = sanitizeQuestions(JSON.parse(match[0]));
             if (!valid.length) throw new Error("Aucune question valide générée.");
-            return valid;
+            return { questions: valid, provider: `Gemini (${model})` };
         } catch (err) {
             errors.push(`${model} : ${err.message}`);
         }
@@ -1042,7 +1059,7 @@ async function callGeminiQuiz(apiKey, text, qCount) {
 
 async function callGroqQuiz(groqKey, text, qCount) {
     // Modèles gratuits Groq proches de Flash-Lite, calibrés sous la limite gratuite de 8 000 TPM
-    const models = ["openai/gpt-oss-20b", "openai/gpt-oss-120b", "qwen/qwen3.8-27b"];
+    const models = ["openai/gpt-oss-20b"];
     const excerpt = prepareTextForQuiz(text, 16000);
     const prompt = buildQuizPrompt(excerpt, qCount, true);
 
@@ -1061,7 +1078,7 @@ async function callGroqQuiz(groqKey, text, qCount) {
                         model,
                         messages: [{ role: "user", content: prompt }],
                         response_format: { type: "json_object" },
-                        temperature: 0.3
+                        temperature: 0.45
                     })
                 },
                 30000
@@ -1075,7 +1092,7 @@ async function callGroqQuiz(groqKey, text, qCount) {
             const list = Array.isArray(parsed) ? parsed : (parsed.questions || parsed.quiz || []);
             const valid = sanitizeQuestions(list);
             if (!valid.length) throw new Error("Aucune question valide générée.");
-            return valid;
+            return { questions: valid, provider: `Groq (${model})` };
         } catch (err) {
             errors.push(`${model} : ${err.message}`);
         }
@@ -1146,7 +1163,9 @@ async function finishAndQuiz() {
     btn.textContent = "Création du quiz en cours...";
 
     try {
-        generatedQuiz = await generateQuizWithFallback(activeText, qCount);
+        const result = await generateQuizWithFallback(activeText, qCount);
+        generatedQuiz = result.questions;
+        quizProviderLabel = result.provider;
 
         if (activeBook?.pausedPositions?.[chap?.id]) {
             delete activeBook.pausedPositions[chap.id];
@@ -1172,6 +1191,13 @@ function renderQuiz() {
 
     const box = $('quiz-container');
     box.innerHTML = '';
+
+    if (quizProviderLabel) {
+        box.insertAdjacentHTML('beforeend', `
+            <p class="small muted" id="quiz-ai-provider">Généré par : <strong>${esc(quizProviderLabel)}</strong></p>
+        `);
+    }
+
     generatedQuiz.forEach((q, qi) => {
         const div = document.createElement('div');
         div.className = 'q-block';
@@ -1237,6 +1263,7 @@ async function evaluateQuiz() {
     $('quiz-container').insertAdjacentHTML('afterbegin', `
         <div class="score-banner">
             <strong>${score} / ${total} (${Math.round((score / total) * 100)}%)</strong>
+            ${quizProviderLabel ? `<div class="small muted">IA : ${esc(quizProviderLabel)}</div>` : ''}
         </div>
     `);
 
