@@ -1008,7 +1008,7 @@ ${excerpt}
 }
 
 async function callGeminiQuiz(apiKey, text, qCount) {
-    const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.5-flash-lite"];
+    const models = ["gemini-2.5-flash-lite", "gemini-3.5-flash-lite"];
     const excerpt = prepareTextForQuiz(text, 24000);
     const prompt = buildQuizPrompt(excerpt, qCount, false);
 
