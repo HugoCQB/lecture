@@ -1051,7 +1051,7 @@ async function runQuizModels(models, excerpt, rootAsObject, callModel) {
 
 async function callGeminiQuiz(apiKey, text) {
     const excerpt = prepareTextForQuiz(text, 24000);
-    return runQuizModels(["gemini-2.5-flash-lite", "gemini-3.5-flash-lite"], excerpt, false, async (model, prompt) => {
+    return runQuizModels(["gemini-3.5-flash-lite"], excerpt, false, async (model, prompt) => {
         const res = await fetchWithTimeout(
             `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
             {
