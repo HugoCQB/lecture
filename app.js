@@ -215,11 +215,10 @@ function renderStats() {
 function questionCount(words) {
     const pages = (words || 0) / 250;
     if (pages <= 2) return 4;
-    if (pages <= 5) return 6;
-    if (pages <= 9) return 8;
-    if (pages <= 14) return 11;
-    if (pages <= 20) return 14;
-    return 16;
+    if (pages <= 5) return 8;
+    if (pages <= 9) return 10;
+    if (pages <= 14) return 12;
+    return 14;
 }
 
 // --- BACK-END : SYNCHRONISATION FIREBASE BLINDÉE ---
@@ -985,7 +984,7 @@ function updateScroll() {
     $('scroll-percent').textContent = max <= 0 ? "100%" : `${Math.min(100, Math.round((window.scrollY / max) * 100))}%`;
 }
 
-function prepareTextForQuiz(text, maxChars = 28000) {
+function prepareTextForQuiz(text, maxChars = 24000) {
     if (text.length <= maxChars) return text;
     const part = Math.floor(maxChars / 3);
     const mid = Math.floor((text.length - part) / 2);
@@ -997,28 +996,20 @@ function buildQuizPrompt(excerpt, qCount, rootAsObject = false) {
         ? `{"questions":[{"question":"...","options":["Option 1","Option 2","Option 3","Option 4"],"answer":0,"explanation":"..."}]}`
         : `[{"question":"...","options":["Option 1","Option 2","Option 3","Option 4"],"answer":0,"explanation":"..."}]`;
 
-    return `You are a demanding reading comprehension professor. Write the entire output ("question", "options", "explanation") strictly in the EXACT SAME LANGUAGE as the provided story excerpt. Never translate into another language.
+    return `Make a multiple-choice quiz of ${qCount} questions (4 options each, answer index 0-3) based on this chapter, in the same language as the chapter.
 
-Generate exactly ${qCount} multiple-choice questions (4 options each, index 0, 1, 2, or 3) covering the whole passage.
-
-Difficulty & fairness rules:
-1. Make each question impossible to answer by pure guessing or general world knowledge without having read the passage, yet clearly answerable for someone who read the passage carefully.
-2. Anchor questions in concrete events, specific choices, exact sequences, relationships, or explicit facts stated in the passage rather than vague generalizations or trivial clichés.
-3. Craft all 3 wrong distractors so they sound realistic and consistent with the story's tone and vocabulary, using plausible twists, swapped details, or partial inaccuracies rather than absurd or obviously false statements.
-4. Keep all 4 options at a similar length (around 10 to 20 words each), similar grammatical structure, and equal level of detail so the right answer does not stand out by length or phrasing.
-
-Return valid JSON only matching this structure:
+JSON only:
 ${schema}
 
-Passage:
+Chapter:
 """
 ${excerpt}
 """`;
 }
 
 async function callGeminiQuiz(apiKey, text, qCount) {
-    const models = ["gemini-3.5-flash-lite"];
-    const excerpt = prepareTextForQuiz(text, 28000);
+    const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.5-flash-lite"];
+    const excerpt = prepareTextForQuiz(text, 24000);
     const prompt = buildQuizPrompt(excerpt, qCount, false);
 
     const errors = [];
@@ -1033,11 +1024,11 @@ async function callGeminiQuiz(apiKey, text, qCount) {
                         contents: [{ parts: [{ text: prompt }] }],
                         generationConfig: {
                             responseMimeType: "application/json",
-                            temperature: 0.45
+                            temperature: 0.4
                         }
                     })
                 },
-                30000
+                35000
             );
 
             const json = await res.json();
@@ -1058,7 +1049,6 @@ async function callGeminiQuiz(apiKey, text, qCount) {
 }
 
 async function callGroqQuiz(groqKey, text, qCount) {
-    // Modèles gratuits Groq proches de Flash-Lite, calibrés sous la limite gratuite de 8 000 TPM
     const models = ["openai/gpt-oss-20b"];
     const excerpt = prepareTextForQuiz(text, 16000);
     const prompt = buildQuizPrompt(excerpt, qCount, true);
@@ -1078,7 +1068,7 @@ async function callGroqQuiz(groqKey, text, qCount) {
                         model,
                         messages: [{ role: "user", content: prompt }],
                         response_format: { type: "json_object" },
-                        temperature: 0.45
+                        temperature: 0.4
                     })
                 },
                 30000
