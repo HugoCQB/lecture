@@ -32,6 +32,10 @@ const slugifyTitle = t => String(t || "sans_titre")
     .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     .toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 48) || "sans_titre";
 
+const stripChapterPrefix = (label, fallbackIndex = 0) => String(label || "")
+    .replace(/^chapitre\s*\d+\s*[:.-]?\s*/i, "")
+    .trim() || `Partie ${fallbackIndex + 1}`;
+
 const dateKey = (offset = 0) => {
     const d = new Date();
     d.setDate(d.getDate() + offset);
@@ -202,7 +206,7 @@ async function saveBookCloud(book) {
                 patch[`chapters/${n}`] = {
                     id: c.id || `chap_${n + 1}`,
                     chapterNum: c.chapterNum || n + 1,
-                    label: c.label || `Chapitre ${n + 1}`,
+                    label: stripChapterPrefix(c.label, n),
                     text: c.text,
                     wordCount: c.wordCount || c.text.split(/\s+/).filter(Boolean).length
                 };
@@ -492,7 +496,13 @@ async function parseEpub(file) {
         if (wordCount < 45) continue;
 
         const num = chapters.length + 1;
-        chapters.push({ id: `chap_${num}`, chapterNum: num, label: `Chapitre ${num}${heading ? ` : ${heading}` : ""}`, text, wordCount });
+        chapters.push({
+            id: `chap_${num}`,
+            chapterNum: num,
+            label: heading || `Partie ${num}`,
+            text,
+            wordCount
+        });
     }
     return { bookTitle, chapters };
 }
@@ -600,8 +610,9 @@ function renderLibrary(selectedId = null) {
     const select = $('chapter-select');
     select.innerHTML = current.chapters.map((c, i) => {
         const tag = readSet.has(c.id) ? "✓ " : (current.pausedPositions?.[c.id] > 0 ? "⏸ " : "");
+        const chapTitle = stripChapterPrefix(c.label, i);
         const pages = Math.max(1, Math.round((c.wordCount || 0) / 250));
-        return `<option value="${i}">${tag}${esc(c.label)} (~${pages} p.)</option>`;
+        return `<option value="${i}">${tag}${esc(chapTitle)} (~${pages} p.)</option>`;
     }).join('');
 
     $('chapter-selector-box').hidden = false;
