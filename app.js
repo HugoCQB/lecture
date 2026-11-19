@@ -42,6 +42,19 @@ const toArray = val => Array.isArray(val) ? val : Object.values(val || {});
 const mergeReadChapters = (...lists) => [...new Set(lists.flatMap(l => toArray(l)).filter(Boolean))];
 const isChapterValidated = (book, chap) => Boolean(book && chap && toArray(book.readChapters).includes(chap.id));
 
+function shuffleQuestionOptions(q) {
+    const indexed = q.options.map((text, idx) => ({ text, isCorrect: idx === q.answer }));
+    for (let i = indexed.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [indexed[i], indexed[j]] = [indexed[j], indexed[i]];
+    }
+    return {
+        ...q,
+        options: indexed.map(item => item.text),
+        answer: indexed.findIndex(item => item.isCorrect)
+    };
+}
+
 async function fetchWithTimeout(url, opts = {}, timeoutMs = 15000) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -68,10 +81,11 @@ async function fb(path, method = "GET", body = null) {
 async function sha256(str) {
     if (!str) return null;
     const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join("");
 }
 
 function showView(viewId) {
+    if (viewId !== 'game-screen') stopAutoScroll();
     ['setup-screen', 'game-screen', 'quiz-screen'].forEach(id => {
         const el = $(id);
         if (el) el.hidden = id !== viewId;
@@ -91,10 +105,23 @@ function getStreak(stats = userStats) {
     return (stats.lastReadDate === dateKey(0) || stats.lastReadDate === dateKey(-1)) ? stats.streakDays : 0;
 }
 
+function getQuizSuccessRatio(stats = userStats) {
+    const completed = stats?.quizzesCompleted || 0;
+    const succeeded = stats?.perfectScores || 0;
+    if (!completed) return null;
+    return Math.round((succeeded / completed) * 100);
+}
+
 function renderStats() {
     $('stat-streak').textContent = `${getStreak()} j`;
     $('stat-chapters').textContent = userStats.totalChaptersRead || 0;
     $('stat-score').textContent = userStats.scoreTotal || 0;
+    const ratio = getQuizSuccessRatio();
+    if ($('stat-ratio')) {
+        $('stat-ratio').textContent = ratio === null
+            ? "—"
+            : `${ratio}% (${userStats.perfectScores || 0}/${userStats.quizzesCompleted || 0})`;
+    }
 }
 
 function questionCount(words) {
@@ -148,7 +175,6 @@ async function saveBookCloud(book) {
 
         const base = `focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`;
 
-        // Lecture défensive de l'existant distant pour ne jamais écraser une progression antérieure
         const existingDistant = await fb(base).catch(() => null);
         const mergedRead = mergeReadChapters(existingDistant?.readChapters, book.readChapters);
         const mergedPaused = { ...(existingDistant?.pausedPositions || {}), ...(book.pausedPositions || {}) };
@@ -217,7 +243,6 @@ async function saveBookProgress(book) {
         }
         const base = `focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`;
 
-        // Fusion avec la liste distante pour garantir que readChapters ne régresse jamais
         const distantRead = await fb(`${base}/readChapters`).catch(() => []);
         const mergedRead = mergeReadChapters(distantRead, book.readChapters);
         book.readChapters = mergedRead;
@@ -261,7 +286,6 @@ async function pullAccount(silent = false) {
         const data = await fb(`focus_read_users/${encodeURIComponent(syncKey)}`);
         if (isSaving) return;
 
-        // Réponse 200 confirmée : le compte n'existe pas encore sur Firebase
         if (data === null) {
             accountLoaded = true;
             setSyncStatus("Nouveau profil", true);
@@ -288,7 +312,6 @@ async function pullAccount(silent = false) {
             updateAccountUI();
         }
 
-        // Fusion défensive : on garde toujours le maximum entre local (si déjà chargé) et distant
         userStats = {
             scoreTotal: Math.max(accountLoaded ? userStats.scoreTotal : 0, data.scoreTotal || 0),
             quizzesCompleted: Math.max(accountLoaded ? userStats.quizzesCompleted : 0, data.quizzesCompleted || 0),
@@ -318,7 +341,6 @@ async function pullAccount(silent = false) {
         if (!$('setup-screen').hidden) renderLibrary(activeBook?.id);
         setSyncStatus(`À jour · ${accountBooks.length} livre${accountBooks.length > 1 ? 's' : ''}`, true);
     } catch (e) {
-        // En cas d'erreur réseau, accountLoaded reste false si non chargé : aucune écriture ne peut écraser la base
         if (!silent) setSyncStatus(`Erreur réseau (${e.message})`);
     }
 }
@@ -329,7 +351,6 @@ async function pushStats() {
     try {
         if (!await canWriteAccount()) return setSyncStatus("Écriture refusée");
 
-        // Relecture distante avant écriture pour empêcher toute régression de compteur
         const distant = await fb(`focus_read_users/${encodeURIComponent(syncKey)}`).catch(() => null);
         const safeStats = {
             scoreTotal: Math.max(distant?.scoreTotal || 0, userStats.scoreTotal || 0),
@@ -388,7 +409,7 @@ async function switchAccount() {
     await pullAccount();
 }
 
-// --- IMPORT EPUB / TXT & BIBLIOTHÈQUE ---
+// --- IMPORT EPUP & BIBLIOTHÈQUE ---
 
 async function handleFileUpload(e) {
     const file = e.target.files[0];
@@ -397,20 +418,14 @@ async function handleFileUpload(e) {
     label.textContent = "Analyse du fichier...";
 
     try {
-        let title = file.name.replace(/\.(epub|txt)$/i, '');
-        let chapters = [];
-
-        if (file.name.toLowerCase().endsWith('.epub')) {
-            ({ bookTitle: title, chapters } = await parseEpub(file));
-        } else {
-            const clean = (await file.text()).replace(/\r\n/g, '\n').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
-            if (clean.length < 30) throw new Error("Fichier trop court.");
-            chapters = [{ id: "chap_1", chapterNum: 1, label: `Chapitre 1 : ${title}`, text: clean, wordCount: clean.split(/\s+/).length }];
+        if (!file.name.toLowerCase().endsWith('.epub')) {
+            throw new Error("Seuls les fichiers .epub sont pris en charge.");
         }
+
+        const { bookTitle: title, chapters } = await parseEpub(file);
 
         if (!chapters.length) throw new Error("Aucun chapitre lisible trouvé.");
 
-        // ID stable basé sur le titre normalisé (indépendant du nom de fichier ou de sa taille)
         const slugId = cleanKey(`book_${slugifyTitle(title)}`);
         const legacyId = cleanKey(`book_${file.name}_${file.size}`);
         const existing = accountBooks.find(b => b.id === slugId || b.id === legacyId || slugifyTitle(b.title) === slugifyTitle(title));
@@ -435,7 +450,7 @@ async function handleFileUpload(e) {
     } catch (err) {
         alert("Erreur import : " + err.message);
     } finally {
-        label.textContent = "+ Importer un livre (EPUB / TXT)";
+        label.textContent = "+ Importer un livre (EPUB)";
         $('file-input').value = '';
     }
 }
@@ -551,7 +566,6 @@ function renderLibrary(selectedId = null) {
             renderLibrary(book.id);
         };
 
-        // Double confirmation avant toute suppression définitive d'un livre
         row.querySelector('.btn-del').onclick = async e => {
             e.stopPropagation();
             if (!accountLoaded || !syncKey || !book.id) return;
@@ -613,9 +627,85 @@ async function selectChapter(idx, save = true) {
     }
 }
 
+// --- DÉFILEMENT AUTOMATIQUE ---
+
+const AUTO_SPEEDS = [0.5, 1, 1.5, 2, 3];
+let autoSpeedIdx = parseInt(localStorage.getItem("focus_read_autoscroll_speed_idx") || "1", 10);
+if (isNaN(autoSpeedIdx) || autoSpeedIdx < 0 || autoSpeedIdx >= AUTO_SPEEDS.length) autoSpeedIdx = 1;
+
+let autoScrollActive = false;
+let autoScrollRafId = null;
+let autoScrollLastTime = 0;
+let autoScrollRemainder = 0;
+
+function updateAutoScrollButtons() {
+    const toggleBtn = $('autoscroll-toggle-btn');
+    const speedBtn = $('autoscroll-speed-btn');
+    if (toggleBtn) toggleBtn.classList.toggle('active-mode', autoScrollActive);
+    if (speedBtn) speedBtn.textContent = `${AUTO_SPEEDS[autoSpeedIdx]}x`;
+}
+
+function stopAutoScroll() {
+    autoScrollActive = false;
+    autoScrollRemainder = 0;
+    if (autoScrollRafId) {
+        cancelAnimationFrame(autoScrollRafId);
+        autoScrollRafId = null;
+    }
+    updateAutoScrollButtons();
+}
+
+function autoScrollStep(timestamp) {
+    if (!autoScrollActive || $('game-screen')?.hidden) {
+        stopAutoScroll();
+        return;
+    }
+    if (!autoScrollLastTime) autoScrollLastTime = timestamp;
+    const dt = Math.min(100, timestamp - autoScrollLastTime);
+    autoScrollLastTime = timestamp;
+
+    // Vitesse de base en pixels par seconde modulée par le multiplicateur
+    const pxPerSec = 26 * AUTO_SPEEDS[autoSpeedIdx];
+    autoScrollRemainder += (pxPerSec * dt) / 1000;
+
+    if (autoScrollRemainder >= 1) {
+        const stepPx = Math.floor(autoScrollRemainder);
+        autoScrollRemainder -= stepPx;
+        const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
+        if (window.scrollY >= maxScroll - 1) {
+            stopAutoScroll();
+            return;
+        }
+        window.scrollBy(0, stepPx);
+    }
+
+    autoScrollRafId = requestAnimationFrame(autoScrollStep);
+}
+
+function toggleAutoScroll() {
+    if (autoScrollActive) {
+        stopAutoScroll();
+    } else {
+        const maxScroll = document.documentElement.scrollHeight - window.innerHeight;
+        if (maxScroll <= 0 || window.scrollY >= maxScroll - 1) return;
+        autoScrollActive = true;
+        autoScrollLastTime = 0;
+        autoScrollRemainder = 0;
+        updateAutoScrollButtons();
+        autoScrollRafId = requestAnimationFrame(autoScrollStep);
+    }
+}
+
+function cycleAutoScrollSpeed() {
+    autoSpeedIdx = (autoSpeedIdx + 1) % AUTO_SPEEDS.length;
+    localStorage.setItem("focus_read_autoscroll_speed_idx", String(autoSpeedIdx));
+    updateAutoScrollButtons();
+}
+
 // --- LECTURE & GÉNÉRATION DE QUIZ ROBUSTE ---
 
 function startReading() {
+    stopAutoScroll();
     const chap = activeBook?.chapters[currentChapterIndex];
     if (!chap) return;
     activeText = chap.text;
@@ -627,6 +717,7 @@ function startReading() {
         ? "Chapitre déjà validé · Retour à l'accueil"
         : `Terminer & Lancer le quiz (${qCount} questions)`;
     $('text-track').textContent = activeText;
+    updateAutoScrollButtons();
 
     showView('game-screen');
     requestAnimationFrame(() => {
@@ -636,6 +727,7 @@ function startReading() {
 }
 
 async function pauseReading() {
+    stopAutoScroll();
     const chap = activeBook?.chapters[currentChapterIndex];
     const btn = $('pause-reading-btn');
     if (btn) btn.disabled = true;
@@ -667,7 +759,7 @@ function prepareTextForQuiz(text, maxChars = 28000) {
 async function callGeminiQuiz(apiKey, text, qCount) {
     const models = ["gemini-3.5-flash-lite", "gemini-3.8-flash"];
     const excerpt = prepareTextForQuiz(text);
-    const prompt = `Tu es un professeur exigeant. À partir du texte suivant, génère exactement ${qCount} questions QCM de compréhension à 3 choix (index 0, 1 ou 2) couvrant l'ensemble du passage.\nFormat JSON attendu : [{"question":"...","options":["Choix 1","Choix 2","Choix 3"],"answer":0,"explanation":"Explication courte"}]\n\nTexte :\n"""\n${excerpt}\n"""`;
+    const prompt = `Tu es un professeur exigeant. À partir du texte suivant, génère exactement ${qCount} questions QCM de compréhension à 3 choix (index 0, 1 ou 2) couvrant l'ensemble du passage.\nRègles strictes pour éviter que la bonne réponse soit devinable : les 3 options doivent avoir une longueur comparable (environ 8 à 18 mots chacune), un niveau de précision et un style de formulation identiques, sans indices ni détails superflus réservés à la bonne réponse.\nFormat JSON attendu : [{"question":"...","options":["Choix 1","Choix 2","Choix 3"],"answer":0,"explanation":"Explication courte"}]\n\nTexte :\n"""\n${excerpt}\n"""`;
 
     const errors = [];
     for (const model of models) {
@@ -696,11 +788,13 @@ async function callGeminiQuiz(apiKey, text, qCount) {
             if (!match) throw new Error("Réponse JSON introuvable.");
 
             const parsed = JSON.parse(match[0]);
-            const valid = parsed.filter(q =>
-                q && typeof q.question === 'string' &&
-                Array.isArray(q.options) && q.options.length >= 2 &&
-                typeof q.answer === 'number' && q.answer >= 0 && q.answer < q.options.length
-            );
+            const valid = parsed
+                .filter(q =>
+                    q && typeof q.question === 'string' &&
+                    Array.isArray(q.options) && q.options.length >= 2 &&
+                    typeof q.answer === 'number' && q.answer >= 0 && q.answer < q.options.length
+                )
+                .map(shuffleQuestionOptions);
 
             if (!valid.length) throw new Error("Aucune question valide générée.");
             return valid;
@@ -712,6 +806,7 @@ async function callGeminiQuiz(apiKey, text, qCount) {
 }
 
 async function finishAndQuiz() {
+    stopAutoScroll();
     const chap = activeBook?.chapters[currentChapterIndex];
 
     if (isChapterValidated(activeBook, chap)) {
@@ -797,30 +892,23 @@ async function evaluateQuiz() {
     document.querySelectorAll('.q-block').forEach((div, qi) => {
         const q = generatedQuiz[qi];
         const chosen = userAnswers[qi];
-        const ok = chosen === q.answer;
-        if (ok) score++;
+        if (chosen === q.answer) score++;
 
         div.querySelectorAll('.q-opt').forEach((b, i) => {
             b.disabled = true;
-            b.classList.remove('selected');
-            if (i === q.answer) { b.classList.add('correct'); b.textContent = `✓ ${q.options[i]}`; }
-            else if (i === chosen) { b.classList.add('wrong'); b.textContent = `✗ ${q.options[i]}`; }
+            if (i === chosen) b.classList.add('selected');
+            else b.classList.remove('selected');
         });
-
-        const exp = document.createElement('div');
-        exp.className = 'q-exp';
-        exp.textContent = q.explanation || (ok ? "Correct." : `Réponse : ${q.options[q.answer]}`);
-        div.appendChild(exp);
     });
 
     const total = generatedQuiz.length;
     const perfect = score === total;
-    const pts = alreadyValidated ? 0 : (score * 10 + (perfect ? 20 : 0));
+    const pts = (!alreadyValidated && perfect) ? (total * 10 + 20) : 0;
 
     if (!alreadyValidated) {
-        userStats.scoreTotal += pts;
         userStats.quizzesCompleted += 1;
         if (perfect) {
+            userStats.scoreTotal += pts;
             userStats.perfectScores += 1;
             activeBook.readChapters = mergeReadChapters(activeBook.readChapters, [chap.id]);
             userStats.totalChaptersRead += 1;
@@ -837,7 +925,6 @@ async function evaluateQuiz() {
     $('quiz-container').insertAdjacentHTML('afterbegin', `
         <div class="score-banner">
             <strong>${score} / ${total} (${Math.round((score / total) * 100)}%)</strong>
-            <span class="muted">${alreadyValidated ? 'Chapitre déjà validé (aucun point ajouté)' : `+${pts} pts · ${perfect ? 'Chapitre validé ✓' : '100 % requis pour valider'}`}</span>
         </div>
     `);
 
@@ -911,19 +998,35 @@ async function openLeaderboard() {
         const data = await fb('focus_read_users');
         if (!data) return (list.innerHTML = '<div class="row"><span class="muted">Aucun lecteur.</span></div>');
 
-        list.innerHTML = Object.entries(data)
-            .map(([k, v]) => ({ k, pts: v.scoreTotal || 0, ch: v.totalChaptersRead || v.perfectScores || 0, st: getStreak(v) }))
+        const ranked = Object.entries(data)
+            .map(([k, v]) => {
+                const ratio = getQuizSuccessRatio(v);
+                const ch = v.totalChaptersRead || v.perfectScores || 0;
+                return {
+                    k,
+                    pts: v.scoreTotal || 0,
+                    ch,
+                    st: getStreak(v),
+                    ratioText: ratio === null ? "Ratio —" : `Ratio ${ratio}% (${v.perfectScores || 0}/${v.quizzesCompleted || 0})`
+                };
+            })
+            .filter(p => p.ch > 0)
             .sort((a, b) => b.pts - a.pts)
-            .slice(0, 30)
-            .map((p, i) => `
-                <div class="row ${p.k === syncKey ? 'me' : ''}">
-                    <div class="row-info">
-                        <span class="row-title">${i + 1}. ${esc(p.k)}</span>
-                        <span class="row-sub">Série ${p.st} j · ${p.ch} ch.</span>
-                    </div>
-                    <strong>${p.pts} pts</strong>
+            .slice(0, 30);
+
+        if (!ranked.length) {
+            return (list.innerHTML = '<div class="row"><span class="muted">Aucun lecteur ayant complété au moins un chapitre.</span></div>');
+        }
+
+        list.innerHTML = ranked.map((p, i) => `
+            <div class="row ${p.k === syncKey ? 'me' : ''}">
+                <div class="row-info">
+                    <span class="row-title">${i + 1}. ${esc(p.k)}</span>
+                    <span class="row-sub">Série ${p.st} j · ${p.ch} ch. · ${p.ratioText}</span>
                 </div>
-            `).join('');
+                <strong>${p.pts} pts</strong>
+            </div>
+        `).join('');
     } catch (e) {
         list.innerHTML = `<div class="row"><span class="muted">Erreur : ${e.message}</span></div>`;
     }
@@ -949,7 +1052,11 @@ on('chapter-select', 'onchange', e => selectChapter(e.target.value, true));
 
 on('start-btn', 'onclick', startReading);
 on('pause-reading-btn', 'onclick', pauseReading);
+on('autoscroll-toggle-btn', 'onclick', toggleAutoScroll);
+on('autoscroll-speed-btn', 'onclick', cycleAutoScrollSpeed);
 window.addEventListener('scroll', updateScroll, { passive: true });
+window.addEventListener('wheel', () => { if (autoScrollActive) stopAutoScroll(); }, { passive: true });
+window.addEventListener('touchstart', () => { if (autoScrollActive) stopAutoScroll(); }, { passive: true });
 on('finish-reading-btn', 'onclick', finishAndQuiz);
 
 on('abandon-quiz-btn', 'onclick', () => confirm("Quitter le quiz ?") && (showView('setup-screen'), renderLibrary(activeBook?.id)));
@@ -970,6 +1077,7 @@ document.querySelectorAll('[data-close]').forEach(btn => btn.onclick = () => {
 document.querySelectorAll('.modal-bg').forEach(ov => ov.onclick = e => { if (e.target === ov) ov.hidden = true; });
 
 document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') stopAutoScroll();
     if (document.visibilityState === 'visible' && syncKey && !$('setup-screen').hidden) {
         pullAccount(true);
     }

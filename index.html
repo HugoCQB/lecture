@@ -32,11 +32,12 @@
             <div><strong id="stat-streak">0 j</strong><span>Série</span></div>
             <div><strong id="stat-chapters">0</strong><span>Chapitres</span></div>
             <div><strong id="stat-score">0</strong><span>Points</span></div>
+            <div><strong id="stat-ratio">—</strong><span>Ratio QCM</span></div>
         </section>
 
         <section>
             <button type="button" id="file-drop-zone" class="btn-outline full">
-                <span id="file-label">+ Importer un livre (EPUB / TXT)</span>
+                <span id="file-label">+ Importer un livre EPUB</span>
             </button>
             <input type="file" id="file-input" accept=".epub,.txt" hidden>
         </section>
@@ -76,6 +77,8 @@
             <button id="pause-reading-btn" type="button" class="text-btn">← Pause</button>
             <span id="hud-chapter-title" class="truncate">Chapitre</span>
             <div class="font-controls">
+                <button id="autoscroll-toggle-btn" type="button" class="font-btn" aria-label="Défilement automatique">Auto</button>
+                <button id="autoscroll-speed-btn" type="button" class="font-btn" aria-label="Vitesse de défilement">1x</button>
                 <button id="font-dec-btn" type="button" class="font-btn" aria-label="Réduire le texte">A-</button>
                 <button id="font-inc-btn" type="button" class="font-btn" aria-label="Agrandir le texte">A+</button>
                 <span id="scroll-percent" class="scroll-tag">0%</span>
@@ -115,8 +118,8 @@
             </header>
             <div class="modal-scroll prose">
                 <p><strong>Compte :</strong> Cliquez sur votre identifiant en haut à gauche pour changer de profil ou définir un mot de passe.</p>
-                <p><strong>Livres :</strong> Importez vos fichiers <code>.epub</code> ou <code>.txt</code>, ou ajoutez des titres depuis le <em>Catalogue</em>. L'extension navigateur <em>WebToEpub</em> permet de convertir n'importe quel article ou roman web en <code>.epub</code>.</p>
-                <p><strong>Validation :</strong> Un score de <strong>100 %</strong> au quiz valide le chapitre, maintient votre série quotidienne et crédite vos points.</p>
+                <p><strong>Livres :</strong> Importez vos fichiers <code>.epub</code>, ou ajoutez des titres depuis le <em>Catalogue</em>. L'extension navigateur <em>WebToEpub</em> permet de convertir n'importe quel article ou roman web en <code>.epub</code>.</p>
+                <p><strong>Validation &amp; Points :</strong> Les points ne sont attribués qu'en cas de <strong>100 %</strong> de bonnes réponses au quiz. Le ratio QCM correspond aux quiz réussis à 100 % sur l'ensemble des quiz effectués.</p>
             </div>
         </div>
     </div>
