@@ -11,6 +11,7 @@ const DEFAULT_API_KEY = (typeof ENV !== 'undefined' && ENV.DEFAULT_GEMINI_API_KE
 
 let accountBooks = [];
 let activeBook = null;
+let settingsBookId = null;
 let currentChapterIndex = 0;
 let activeText = "";
 let generatedQuiz = [];
@@ -36,6 +37,16 @@ const stripChapterPrefix = (label, fallbackIndex = 0) => String(label || "")
     .replace(/^chapitre\s*\d+\s*[:.-]?\s*/i, "")
     .trim() || `Partie ${fallbackIndex + 1}`;
 
+const normalizeChapterSig = c => {
+    const cleanTitle = stripChapterPrefix(c?.label || "")
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase().replace(/\s+/g, ' ').trim();
+    const cleanSample = String(c?.text || "")
+        .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+        .toLowerCase().replace(/\s+/g, ' ').trim().slice(0, 140);
+    return `${cleanTitle}::${cleanSample}`;
+};
+
 const dateKey = (offset = 0) => {
     const d = new Date();
     d.setDate(d.getDate() + offset);
@@ -45,6 +56,64 @@ const dateKey = (offset = 0) => {
 const toArray = val => Array.isArray(val) ? val : Object.values(val || {});
 const mergeReadChapters = (...lists) => [...new Set(lists.flatMap(l => toArray(l)).filter(Boolean))];
 const isChapterValidated = (book, chap) => Boolean(book && chap && toArray(book.readChapters).includes(chap.id));
+
+function reindexChaptersAndProgress(rawChapters = [], readChapters = [], pausedPositions = {}) {
+    const idMap = {};
+    const chapters = toArray(rawChapters)
+        .filter(c => c && c.text)
+        .map((c, idx) => {
+            const oldId = c.id || `chap_${idx + 1}`;
+            const newId = `chap_${idx + 1}`;
+            idMap[oldId] = newId;
+            return {
+                id: newId,
+                chapterNum: idx + 1,
+                label: stripChapterPrefix(c.label, idx),
+                text: c.text,
+                wordCount: c.wordCount || c.text.split(/\s+/).filter(Boolean).length
+            };
+        });
+
+    const validIds = new Set(chapters.map(c => c.id));
+    const remappedRead = mergeReadChapters(
+        toArray(readChapters).map(id => idMap[id] || id).filter(id => validIds.has(id))
+    );
+    const remappedPaused = {};
+    for (const [k, v] of Object.entries(pausedPositions || {})) {
+        const mapped = idMap[k] || k;
+        if (validIds.has(mapped)) remappedPaused[mapped] = v;
+    }
+
+    return { chapters, readChapters: remappedRead, pausedPositions: remappedPaused };
+}
+
+function appendChaptersToBook(book, incomingChapters = []) {
+    const baseList = toArray(book.chapters).filter(c => c && c.text);
+    const nextList = toArray(incomingChapters).filter(c => c && c.text);
+    const seenSigs = new Set(baseList.map(normalizeChapterSig));
+    let addedCount = 0;
+
+    const combined = [...baseList];
+    for (const inc of nextList) {
+        const sig = normalizeChapterSig(inc);
+        if (seenSigs.has(sig)) continue;
+        seenSigs.add(sig);
+        combined.push({
+            id: `chap_${combined.length + 1}`,
+            chapterNum: combined.length + 1,
+            label: stripChapterPrefix(inc.label, combined.length),
+            text: inc.text,
+            wordCount: inc.wordCount || inc.text.split(/\s+/).filter(Boolean).length
+        });
+        addedCount += 1;
+    }
+
+    const reindexed = reindexChaptersAndProgress(combined, book.readChapters, book.pausedPositions);
+    book.chapters = reindexed.chapters;
+    book.readChapters = reindexed.readChapters;
+    book.pausedPositions = reindexed.pausedPositions;
+    return addedCount;
+}
 
 function shuffleQuestionOptions(q) {
     const indexed = q.options.map((text, idx) => ({ text, isCorrect: idx === q.answer }));
@@ -178,11 +247,15 @@ async function saveBookCloud(book) {
         }
 
         const base = `focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`;
-
         const existingDistant = await fb(base).catch(() => null);
+
+        const finalChapters = toArray(book.chapters).filter(c => c && c.text);
         const mergedRead = mergeReadChapters(existingDistant?.readChapters, book.readChapters);
         const mergedPaused = { ...(existingDistant?.pausedPositions || {}), ...(book.pausedPositions || {}) };
-        const mergedLastIndex = Math.max(existingDistant?.lastIndex || 0, book.lastIndex || 0);
+        const mergedLastIndex = Math.max(
+            0,
+            Math.min(book.lastIndex ?? existingDistant?.lastIndex ?? 0, Math.max(0, finalChapters.length - 1))
+        );
 
         const meta = {
             id: book.id,
@@ -198,14 +271,15 @@ async function saveBookCloud(book) {
         };
 
         await fb(base, "PATCH", meta);
+        await fb(`${base}/chapters`, "DELETE").catch(() => {});
 
-        for (let i = 0; i < book.chapters.length; i += 5) {
+        for (let i = 0; i < finalChapters.length; i += 5) {
             const patch = {};
-            book.chapters.slice(i, i + 5).forEach((c, idx) => {
+            finalChapters.slice(i, i + 5).forEach((c, idx) => {
                 const n = i + idx;
                 patch[`chapters/${n}`] = {
                     id: c.id || `chap_${n + 1}`,
-                    chapterNum: c.chapterNum || n + 1,
+                    chapterNum: n + 1,
                     label: stripChapterPrefix(c.label, n),
                     text: c.text,
                     wordCount: c.wordCount || c.text.split(/\s+/).filter(Boolean).length
@@ -214,7 +288,7 @@ async function saveBookCloud(book) {
             await fb(base, "PATCH", patch);
         }
 
-        const full = { ...meta, chapters: book.chapters };
+        const full = { ...meta, chapters: finalChapters };
         const idx = accountBooks.findIndex(b => b.id === book.id);
         idx >= 0 ? (accountBooks[idx] = full) : accountBooks.unshift(full);
 
@@ -413,7 +487,7 @@ async function switchAccount() {
     await pullAccount();
 }
 
-// --- IMPORT EPUP & BIBLIOTHÈQUE ---
+// --- IMPORT EPUB & PARAMÈTRES DU LIVRE ---
 
 async function handleFileUpload(e) {
     const file = e.target.files[0];
@@ -427,25 +501,20 @@ async function handleFileUpload(e) {
         }
 
         const { bookTitle: title, chapters } = await parseEpub(file);
-
         if (!chapters.length) throw new Error("Aucun chapitre lisible trouvé.");
 
-        const slugId = cleanKey(`book_${slugifyTitle(title)}`);
-        const legacyId = cleanKey(`book_${file.name}_${file.size}`);
-        const existing = accountBooks.find(b => b.id === slugId || b.id === legacyId || slugifyTitle(b.title) === slugifyTitle(title));
-        const bookId = existing?.id || slugId;
-
+        const bookId = cleanKey(`book_${slugifyTitle(title)}_${Date.now()}`);
         const book = {
             id: bookId,
-            publicId: existing?.publicId || null,
+            publicId: null,
             title,
             fileName: file.name,
-            visibility: existing?.visibility || 'public',
+            visibility: 'public',
             sharedBy: syncKey || "Anonyme",
             chapters,
-            readChapters: mergeReadChapters(existing?.readChapters),
-            pausedPositions: existing?.pausedPositions || {},
-            lastIndex: existing ? Math.min(existing.lastIndex || 0, chapters.length - 1) : 0,
+            readChapters: [],
+            pausedPositions: {},
+            lastIndex: 0,
             updatedAt: Date.now()
         };
 
@@ -454,8 +523,181 @@ async function handleFileUpload(e) {
     } catch (err) {
         alert("Erreur import : " + err.message);
     } finally {
-        label.textContent = "+ Importer un livre (EPUB)";
+        label.textContent = "+ Importer un livre EPUB";
         $('file-input').value = '';
+    }
+}
+
+function openBookSettings(bookId) {
+    const book = accountBooks.find(b => b.id === bookId);
+    if (!book) return;
+    settingsBookId = book.id;
+    $('book-settings-title').textContent = book.title;
+    renderBookSettingsModal(book);
+    $('book-settings-overlay').hidden = false;
+}
+
+function renderBookSettingsModal(book) {
+    if (!book) return;
+    const isPub = book.visibility === 'public';
+    const isOwner = !book.sharedBy || book.sharedBy === syncKey || book.sharedBy === "Anonyme";
+
+    $('book-visibility-badge').textContent = `Statut : ${isPub ? 'Public' : 'Privé'}`;
+    const visBtn = $('settings-vis-btn');
+    if (visBtn) {
+        visBtn.hidden = isPub && !isOwner;
+        visBtn.disabled = false;
+        visBtn.textContent = isPub ? 'Rendre privé' : 'Rendre public';
+        visBtn.onclick = async () => {
+            visBtn.disabled = true;
+            if (!isPub) {
+                book.visibility = (await publishPublic(book)) ? 'public' : 'private';
+            } else {
+                await fb(`focus_read_public_books/${encodeURIComponent(book.publicId || book.id)}`, "DELETE").catch(() => {});
+                book.visibility = 'private';
+            }
+            book.updatedAt = Date.now();
+            await saveBookCloud(book);
+            renderBookSettingsModal(book);
+            renderLibrary(book.id);
+        };
+    }
+
+    const delBtn = $('settings-del-btn');
+    if (delBtn) {
+        delBtn.disabled = false;
+        delBtn.onclick = async () => {
+            const readCount = (book.readChapters || []).filter(id => book.chapters.some(c => c.id === id)).length;
+            if (!accountLoaded || !syncKey || !book.id) return;
+            if (!confirm(`Voulez-vous vraiment supprimer "${book.title}" et sa progression (${readCount}/${book.chapters.length} ch.) ?`)) return;
+            const typed = prompt(`Pour confirmer la suppression définitive, tapez : SUPPRIMER`);
+            if (typed !== "SUPPRIMER") return;
+
+            delBtn.disabled = true;
+            isSaving = true;
+            try {
+                if (!await canWriteAccount()) return alert("Accès refusé.");
+                await fb(`focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`, "DELETE");
+                if (isPub && isOwner) await fb(`focus_read_public_books/${encodeURIComponent(book.publicId || book.id)}`, "DELETE").catch(() => {});
+                accountBooks = accountBooks.filter(b => b.id !== book.id);
+                $('book-settings-overlay').hidden = true;
+                settingsBookId = null;
+                renderLibrary();
+            } finally {
+                isSaving = false;
+                delBtn.disabled = false;
+            }
+        };
+    }
+
+    const container = $('book-chapters-manager');
+    const countEl = $('book-settings-count');
+    if (!container) return;
+
+    const readSet = new Set(book.readChapters || []);
+    countEl.textContent = `${book.chapters.length} chapitre${book.chapters.length > 1 ? 's' : ''}`;
+
+    if (!book.chapters.length) {
+        container.innerHTML = '<div class="row static-row"><span class="muted">Aucun chapitre.</span></div>';
+        return;
+    }
+
+    container.innerHTML = '';
+    book.chapters.forEach((chap, idx) => {
+        const isRead = readSet.has(chap.id);
+        const pages = Math.max(1, Math.round((chap.wordCount || 0) / 250));
+        const row = document.createElement('div');
+        row.className = 'row static-row';
+        row.innerHTML = `
+            <div class="row-info">
+                <span class="row-title">${idx + 1}. ${esc(stripChapterPrefix(chap.label, idx))}</span>
+                <span class="row-sub">~${pages} p.${isRead ? ' · Validé' : ''}</span>
+            </div>
+            <div class="row-btns">
+                <button type="button" class="btn-mini btn-up" ${idx === 0 ? 'disabled' : ''} aria-label="Monter">↑</button>
+                <button type="button" class="btn-mini btn-down" ${idx === book.chapters.length - 1 ? 'disabled' : ''} aria-label="Descendre">↓</button>
+                <button type="button" class="btn-mini btn-rm" ${book.chapters.length <= 1 ? 'disabled' : ''}>Suppr.</button>
+            </div>
+        `;
+
+        row.querySelector('.btn-up').onclick = async () => {
+            if (idx === 0) return;
+            const copy = [...book.chapters];
+            [copy[idx - 1], copy[idx]] = [copy[idx], copy[idx - 1]];
+            await commitChapterChanges(book, copy);
+        };
+
+        row.querySelector('.btn-down').onclick = async () => {
+            if (idx >= book.chapters.length - 1) return;
+            const copy = [...book.chapters];
+            [copy[idx], copy[idx + 1]] = [copy[idx + 1], copy[idx]];
+            await commitChapterChanges(book, copy);
+        };
+
+        row.querySelector('.btn-rm').onclick = async () => {
+            if (book.chapters.length <= 1) return;
+            if (!confirm(`Supprimer le chapitre "${stripChapterPrefix(chap.label, idx)}" ?`)) return;
+            const copy = book.chapters.filter((_, i) => i !== idx);
+            await commitChapterChanges(book, copy);
+        };
+
+        container.appendChild(row);
+    });
+}
+
+async function commitChapterChanges(book, nextChapters) {
+    const reindexed = reindexChaptersAndProgress(nextChapters, book.readChapters, book.pausedPositions);
+    book.chapters = reindexed.chapters;
+    book.readChapters = reindexed.readChapters;
+    book.pausedPositions = reindexed.pausedPositions;
+    book.lastIndex = Math.max(0, Math.min(book.lastIndex || 0, Math.max(0, book.chapters.length - 1)));
+    book.updatedAt = Date.now();
+
+    if (book.visibility === 'public') await publishPublic(book);
+    await saveBookCloud(book);
+    renderBookSettingsModal(book);
+    renderLibrary(book.id);
+}
+
+async function handleAppendChapters(e) {
+    const file = e.target.files[0];
+    const book = accountBooks.find(b => b.id === settingsBookId);
+    if (!file || !book) {
+        $('append-chapters-input').value = '';
+        return;
+    }
+
+    const btn = $('add-chapters-btn');
+    const prevText = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "Ajout...";
+
+    try {
+        if (!file.name.toLowerCase().endsWith('.epub')) {
+            throw new Error("Seuls les fichiers .epub sont pris en charge.");
+        }
+        const { chapters: incoming } = await parseEpub(file);
+        if (!incoming.length) throw new Error("Aucun chapitre lisible trouvé dans ce fichier.");
+
+        const prevLen = book.chapters.length;
+        const added = appendChaptersToBook(book, incoming);
+        if (added > 0) {
+            book.lastIndex = prevLen;
+            book.updatedAt = Date.now();
+            if (book.visibility === 'public') await publishPublic(book);
+            await saveBookCloud(book);
+            renderBookSettingsModal(book);
+            renderLibrary(book.id);
+            alert(`${added} chapitre${added > 1 ? 's' : ''} ajouté${added > 1 ? 's' : ''} à "${book.title}".`);
+        } else {
+            alert("Aucun nouveau chapitre à ajouter.");
+        }
+    } catch (err) {
+        alert("Erreur ajout chapitres : " + err.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = prevText;
+        $('append-chapters-input').value = '';
     }
 }
 
@@ -545,7 +787,6 @@ function renderLibrary(selectedId = null) {
     books.forEach(book => {
         const readCount = (book.readChapters || []).filter(id => book.chapters.some(c => c.id === id)).length;
         const isPub = book.visibility === 'public';
-        const isOwner = !book.sharedBy || book.sharedBy === syncKey || book.sharedBy === "Anonyme";
 
         const row = document.createElement('div');
         row.className = `row ${book.id === current.id ? 'active' : ''}`;
@@ -555,44 +796,14 @@ function renderLibrary(selectedId = null) {
                 <span class="row-sub">${readCount}/${book.chapters.length} ch. · ${isPub ? 'Public' : 'Privé'}</span>
             </div>
             <div class="row-btns">
-                ${(!isPub || isOwner) ? `<button type="button" class="btn-mini btn-vis">${isPub ? 'Privé' : 'Publier'}</button>` : ''}
-                <button type="button" class="btn-mini btn-del">Suppr.</button>
+                <button type="button" class="btn-mini btn-cfg">Paramètres</button>
             </div>
         `;
 
         row.querySelector('.row-info').onclick = () => renderLibrary(book.id);
-
-        const visBtn = row.querySelector('.btn-vis');
-        if (visBtn) visBtn.onclick = async e => {
+        row.querySelector('.btn-cfg').onclick = e => {
             e.stopPropagation();
-            visBtn.disabled = true;
-            if (!isPub) {
-                book.visibility = (await publishPublic(book)) ? 'public' : 'private';
-            } else {
-                await fb(`focus_read_public_books/${encodeURIComponent(book.publicId || book.id)}`, "DELETE").catch(() => {});
-                book.visibility = 'private';
-            }
-            await saveBookCloud(book);
-            renderLibrary(book.id);
-        };
-
-        row.querySelector('.btn-del').onclick = async e => {
-            e.stopPropagation();
-            if (!accountLoaded || !syncKey || !book.id) return;
-            if (!confirm(`Voulez-vous vraiment supprimer "${book.title}" et sa progression (${readCount}/${book.chapters.length} ch.) ?`)) return;
-            const typed = prompt(`Pour confirmer la suppression définitive, tapez : SUPPRIMER`);
-            if (typed !== "SUPPRIMER") return;
-
-            isSaving = true;
-            try {
-                if (!await canWriteAccount()) return alert("Accès refusé.");
-                await fb(`focus_read_users/${encodeURIComponent(syncKey)}/library/${encodeURIComponent(book.id)}`, "DELETE");
-                if (isPub && isOwner) await fb(`focus_read_public_books/${encodeURIComponent(book.publicId || book.id)}`, "DELETE").catch(() => {});
-                accountBooks = accountBooks.filter(b => b.id !== book.id);
-                renderLibrary();
-            } finally {
-                isSaving = false;
-            }
+            openBookSettings(book.id);
         };
 
         list.appendChild(row);
@@ -675,7 +886,6 @@ function autoScrollStep(timestamp) {
     const dt = Math.min(100, timestamp - autoScrollLastTime);
     autoScrollLastTime = timestamp;
 
-    // Vitesse de base en pixels par seconde modulée par le multiplicateur
     const pxPerSec = 26 * AUTO_SPEEDS[autoSpeedIdx];
     autoScrollRemainder += (pxPerSec * dt) / 1000;
 
@@ -770,7 +980,7 @@ function prepareTextForQuiz(text, maxChars = 28000) {
 async function callGeminiQuiz(apiKey, text, qCount) {
     const models = ["gemini-3.5-flash-lite"];
     const excerpt = prepareTextForQuiz(text);
-    const prompt = `Tu es un professeur exigeant. À partir du texte suivant, génère exactement ${qCount} questions QCM de compréhension à 3 choix (index 0, 1 ou 2) couvrant l'ensemble du passage.\nRègles strictes pour éviter que la bonne réponse soit devinable : les 3 options doivent avoir une longueur comparable (environ 8 à 18 mots chacune), un niveau de précision et un style de formulation identiques, sans indices ni détails superflus réservés à la bonne réponse.\nFormat JSON attendu : [{"question":"...","options":["Choix 1","Choix 2","Choix 3"],"answer":0,"explanation":"Explication courte"}]\n\nTexte :\n"""\n${excerpt}\n"""`;
+    const prompt = `Tu es un professeur exigeant. À partir du texte suivant, génère exactement ${qCount} questions QCM de compréhension à 4 choix (index 0, 1, 2 ou 3) couvrant l'ensemble du passage.\nRègles strictes pour éviter que la bonne réponse soit devinable : les 4 options doivent avoir une longueur comparable (environ 8 à 18 mots chacune), un niveau de précision et un style de formulation identiques, sans indices ni détails superflus réservés à la bonne réponse.\nFormat JSON attendu : [{"question":"...","options":["Choix 1","Choix 2","Choix 3","Choix 4"],"answer":0,"explanation":"Explication courte"}]\n\nTexte :\n"""\n${excerpt}\n"""`;
 
     const errors = [];
     for (const model of models) {
@@ -802,8 +1012,9 @@ async function callGeminiQuiz(apiKey, text, qCount) {
             const valid = parsed
                 .filter(q =>
                     q && typeof q.question === 'string' &&
-                    Array.isArray(q.options) && q.options.length >= 2 &&
-                    typeof q.answer === 'number' && q.answer >= 0 && q.answer < q.options.length
+                    Array.isArray(q.options) && q.options.length === 4 &&
+                    q.options.every(o => typeof o === 'string' && o.trim().length > 0) &&
+                    typeof q.answer === 'number' && Number.isInteger(q.answer) && q.answer >= 0 && q.answer < 4
                 )
                 .map(shuffleQuestionOptions);
 
@@ -890,6 +1101,7 @@ function renderQuiz() {
         });
         box.appendChild(div);
     });
+    applyFontSize();
     showView('quiz-screen');
 }
 
@@ -1059,6 +1271,8 @@ on('api-key', 'oninput', e => {
 
 on('file-drop-zone', 'onclick', () => $('file-input')?.click());
 on('file-input', 'onchange', handleFileUpload);
+on('add-chapters-btn', 'onclick', () => $('append-chapters-input')?.click());
+on('append-chapters-input', 'onchange', handleAppendChapters);
 on('chapter-select', 'onchange', e => selectChapter(e.target.value, true));
 
 on('start-btn', 'onclick', startReading);
@@ -1094,21 +1308,27 @@ document.addEventListener('visibilitychange', () => {
     }
 });
 
-// --- TAILLE DU TEXTE DE LECTURE ---
+// --- TAILLE DU TEXTE (LECTURE & QUIZ) ---
 let readFontSize = parseFloat(localStorage.getItem("focus_read_font_size")) || 1.15;
 const applyFontSize = () => {
-    document.documentElement.style.setProperty('--read-size', `${readFontSize.toFixed(2)}rem`);
+    const sizeCss = `${readFontSize.toFixed(2)}rem`;
+    document.documentElement.style.setProperty('--read-size', sizeCss);
     localStorage.setItem("focus_read_font_size", readFontSize.toFixed(2));
     updateScroll();
 };
-on('font-dec-btn', 'onclick', () => {
+const decreaseFontSize = () => {
     readFontSize = Math.max(0.85, readFontSize - 0.1);
     applyFontSize();
-});
-on('font-inc-btn', 'onclick', () => {
+};
+const increaseFontSize = () => {
     readFontSize = Math.min(1.75, readFontSize + 0.1);
     applyFontSize();
-});
+};
+
+on('font-dec-btn', 'onclick', decreaseFontSize);
+on('font-inc-btn', 'onclick', increaseFontSize);
+on('quiz-font-dec-btn', 'onclick', decreaseFontSize);
+on('quiz-font-inc-btn', 'onclick', increaseFontSize);
 applyFontSize();
 
 if ('serviceWorker' in navigator) {

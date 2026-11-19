@@ -40,6 +40,7 @@
                 <span id="file-label">+ Importer un livre EPUB</span>
             </button>
             <input type="file" id="file-input" accept=".epub,.txt" hidden>
+            <input type="file" id="append-chapters-input" accept=".epub" hidden>
         </section>
 
         <section id="library-box" hidden>
@@ -95,8 +96,12 @@
     <!-- QUIZ -->
     <section id="quiz-screen" class="wrap" hidden>
         <header class="bar">
-            <h1 id="quiz-title">Quiz</h1>
-            <button id="abandon-quiz-btn" type="button" class="text-btn">Quitter</button>
+            <h1 id="quiz-title" class="truncate">Quiz</h1>
+            <div class="font-controls">
+                <button id="quiz-font-dec-btn" type="button" class="font-btn" aria-label="Réduire le texte du quiz">A-</button>
+                <button id="quiz-font-inc-btn" type="button" class="font-btn" aria-label="Agrandir le texte du quiz">A+</button>
+                <button id="abandon-quiz-btn" type="button" class="text-btn">Quitter</button>
+            </div>
         </header>
 
         <div id="quiz-container"></div>
@@ -109,6 +114,31 @@
         </div>
     </section>
 
+    <!-- MODALE PARAMÈTRES D'UN LIVRE -->
+    <div id="book-settings-overlay" class="modal-bg" hidden>
+        <div class="modal-box">
+            <header class="bar">
+                <h2 id="book-settings-title" class="truncate">Paramètres du livre</h2>
+                <button type="button" class="text-btn" data-close="book-settings-overlay">Fermer</button>
+            </header>
+
+            <div class="settings-book-actions">
+                <span id="book-visibility-badge" class="small">Statut : Privé</span>
+                <div class="row-btns">
+                    <button id="settings-vis-btn" type="button" class="btn-mini">Rendre public</button>
+                    <button id="settings-del-btn" type="button" class="btn-mini">Supprimer le livre</button>
+                </div>
+            </div>
+
+            <div class="bar small-gap">
+                <span id="book-settings-count" class="small">0 chapitre</span>
+                <button id="add-chapters-btn" type="button" class="btn-mini">+ Ajouter des chapitres (EPUB)</button>
+            </div>
+
+            <div id="book-chapters-manager" class="list modal-scroll"></div>
+        </div>
+    </div>
+
     <!-- MODALE AIDE -->
     <div id="tutorial-overlay" class="modal-bg" hidden>
         <div class="modal-box">
@@ -118,7 +148,7 @@
             </header>
             <div class="modal-scroll prose">
                 <p><strong>Compte :</strong> Cliquez sur votre identifiant en haut à gauche pour changer de profil ou définir un mot de passe.</p>
-                <p><strong>Livres :</strong> Importez vos fichiers <code>.epub</code>, ou ajoutez des titres depuis le <em>Catalogue</em>. L'extension navigateur <em>WebToEpub</em> permet de convertir n'importe quel article ou roman web en <code>.epub</code>.</p>
+                <p><strong>Livres &amp; Chapitres :</strong> Importez vos fichiers <code>.epub</code>, ou ajoutez des titres depuis le <em>Catalogue</em>. Utilisez le bouton <em>Paramètres</em> d'un livre pour gérer sa visibilité (public/privé), le supprimer, ajouter des chapitres depuis un EPUB, changer leur ordre ou supprimer des chapitres.</p>
                 <p><strong>Validation &amp; Points :</strong> Les points ne sont attribués qu'en cas de <strong>100 %</strong> de bonnes réponses au quiz. Le ratio QCM correspond aux quiz réussis à 100 % sur l'ensemble des quiz effectués.</p>
             </div>
         </div>
