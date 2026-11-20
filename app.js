@@ -1034,14 +1034,19 @@ ${excerpt}
 """`;
 }
 
-async function runQuizModels(models, excerpt, rootAsObject, callModel) {
-    const prompt = buildQuizPrompt(excerpt, rootAsObject);
+async function runQuizModels(models, excerpt, targetCount, rootAsObject, callModel) {
+    const prompt = buildQuizPrompt(excerpt, targetCount, rootAsObject);
     const errors = [];
     for (const model of models) {
         try {
-            const questions = await callModel(model, prompt);
-            if (!questions.length) throw new Error("Aucune question valide générée.");
-            return { questions, provider: `${rootAsObject ? "Groq" : "Gemini"} (${model})` };
+            const valid = await callModel(model, prompt);
+            if (valid.length < targetCount) {
+                throw new Error(`Seulement ${valid.length}/${targetCount} question(s) valide(s) générée(s).`);
+            }
+            return {
+                questions: valid.slice(0, targetCount),
+                provider: `${rootAsObject ? "Groq" : "Gemini"} (${model})`
+            };
         } catch (err) {
             errors.push(`${model} : ${err.message}`);
         }
@@ -1049,9 +1054,9 @@ async function runQuizModels(models, excerpt, rootAsObject, callModel) {
     throw new Error(errors.join(" | "));
 }
 
-async function callGeminiQuiz(apiKey, text) {
+async function callGeminiQuiz(apiKey, text, targetCount) {
     const excerpt = prepareTextForQuiz(text, 24000);
-    return runQuizModels(["gemini-3.5-flash-lite"], excerpt, false, async (model, prompt) => {
+    return runQuizModels(["gemini-3.5-flash-lite"], excerpt, targetCount, false, async (model, prompt) => {
         const res = await fetchWithTimeout(
             `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
             {
@@ -1073,9 +1078,9 @@ async function callGeminiQuiz(apiKey, text) {
     });
 }
 
-async function callGroqQuiz(groqKey, text) {
+async function callGroqQuiz(groqKey, text, targetCount) {
     const excerpt = prepareTextForQuiz(text, 16000);
-    return runQuizModels(["openai/gpt-oss-20b"], excerpt, true, async (model, prompt) => {
+    return runQuizModels(["openai/gpt-oss-20b"], excerpt, targetCount, true, async (model, prompt) => {
         const res = await fetchWithTimeout(
             "https://api.groq.com/openai/v1/chat/completions",
             {
@@ -1114,16 +1119,16 @@ function getConfiguredApiKeys() {
     return { geminiKey, groqKey };
 }
 
-async function generateQuizWithFallback(text) {
+async function generateQuizWithFallback(text, targetCount) {
     const { geminiKey, groqKey } = getConfiguredApiKeys();
     if (!geminiKey) throw new Error("Une clé API Gemini est requise avant d'utiliser Groq.");
 
     try {
-        return await callGeminiQuiz(geminiKey, text);
+        return await callGeminiQuiz(geminiKey, text, targetCount);
     } catch (e) {
         if (!groqKey) throw new Error(`Gemini (${e.message})`);
         try {
-            return await callGroqQuiz(groqKey, text);
+            return await callGroqQuiz(groqKey, text, targetCount);
         } catch (groqErr) {
             throw new Error(`Gemini (${e.message}) → Groq (${groqErr.message})`);
         }
@@ -1188,7 +1193,7 @@ async function finishAndQuiz() {
     btn.textContent = "Création du quiz en cours...";
 
     try {
-        const result = await generateQuizWithFallback(activeText);
+        const result = await generateQuizWithFallback(activeText, qCount);
         generatedQuiz = result.questions;
         quizProviderLabel = result.provider;
 
