@@ -1019,6 +1019,7 @@ Content rules:
 - Every question must test comprehension of facts, actions, decisions, discoveries, or exchanges explicitly present in this excerpt.
 - Do not rely on prior chapters, external knowledge of the book, or elements not stated in this excerpt.
 - Maintain a balanced, factual difficulty: avoid trivial micro-details (minor props, exact numbers, or isolated wording) as well as broad thematic questions answerable without reading the passage.
+- Questions must be independent from one another: do not reveal, hint at, or give away the answer to another question in the wording of any question.
 
 Option rules:
 - Provide 4 options per question with similar length and grammatical structure.
